@@ -1,0 +1,15 @@
+{
+    "exposure": 7.5,
+    "gain": 1,
+    "format": "RGB8 (ISP)",
+    "binning": "1",
+    "roi_w": 2592,
+    "roi_h": 1944,
+    "wb_r": 1.923828125,
+    "wb_b": 1.58056640625,
+    "sat_enabled": true,
+    "sat_factor": 1.5099999904632568,
+    "gamma_enabled": true,
+    "gamma_val": 1.190999984741211,
+    "ffc_enabled": false
+}

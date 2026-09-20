@@ -1,0 +1,193 @@
+{
+    "description": "",
+    "steps": [
+        {
+            "path": [
+                {
+                    "type": "mvAppItemType::mvWindowAppItem",
+                    "label": "Alvium Camera",
+                    "tag": 3051,
+                    "alias": "Alvium Camera_3050"
+                },
+                {
+                    "type": "mvAppItemType::mvGroup",
+                    "label": "",
+                    "index": 0,
+                    "tag": "3052",
+                    "alias": ""
+                },
+                {
+                    "type": "mvAppItemType::mvButton",
+                    "label": "Initialize",
+                    "index": 0,
+                    "tag": "3053",
+                    "alias": "alvium_init_btn_3050"
+                }
+            ],
+            "instruction": "Start the Cam",
+            "dim": true,
+            "type": "observe"
+        },
+        {
+            "path": [
+                {
+                    "type": "mvAppItemType::mvWindowAppItem",
+                    "label": "Alvium Camera",
+                    "tag": 3051,
+                    "alias": "Alvium Camera_3050"
+                },
+                {
+                    "type": "mvAppItemType::mvGroup",
+                    "label": "",
+                    "index": 1,
+                    "tag": "3057",
+                    "alias": ""
+                },
+                {
+                    "type": "mvAppItemType::mvCombo",
+                    "label": "",
+                    "index": 0,
+                    "tag": "3058",
+                    "alias": "alvium_trigger_3050"
+                }
+            ],
+            "instruction": "Select the mode",
+            "dim": true,
+            "type": "observe"
+        },
+        {
+            "path": [
+                {
+                    "type": "mvAppItemType::mvWindowAppItem",
+                    "label": "Alvium Camera",
+                    "tag": 3051,
+                    "alias": "Alvium Camera_3050"
+                },
+                {
+                    "type": "mvAppItemType::mvGroup",
+                    "label": "",
+                    "index": 2,
+                    "tag": "3060",
+                    "alias": ""
+                },
+                {
+                    "type": "mvAppItemType::mvInputFloat",
+                    "label": "Expos. (ms)",
+                    "index": 0,
+                    "tag": "3061",
+                    "alias": "alvium_exposure_3050"
+                }
+            ],
+            "instruction": "Adjust the exposure time (slow down the capture)",
+            "dim": true,
+            "type": "observe"
+        },
+        {
+            "path": [
+                {
+                    "type": "mvAppItemType::mvWindowAppItem",
+                    "label": "Alvium Camera",
+                    "tag": 3051,
+                    "alias": "Alvium Camera_3050"
+                },
+                {
+                    "type": "mvAppItemType::mvInputInt",
+                    "label": "Gain (dB)",
+                    "index": 0,
+                    "tag": "3063",
+                    "alias": "alvium_gain_3050"
+                }
+            ],
+            "instruction": "Adjust the gain (increase noise)",
+            "dim": true,
+            "type": "observe"
+        },
+        {
+            "path": [
+                {
+                    "type": "mvAppItemType::mvWindowAppItem",
+                    "label": "Alvium Camera",
+                    "tag": 3051,
+                    "alias": "Alvium Camera_3050"
+                },
+                {
+                    "type": "mvAppItemType::mvCombo",
+                    "label": "Format",
+                    "index": 0,
+                    "tag": "3064",
+                    "alias": "alvium_format_3050"
+                }
+            ],
+            "instruction": "Select image format",
+            "dim": true,
+            "type": "observe"
+        },
+        {
+            "path": [
+                {
+                    "type": "mvAppItemType::mvWindowAppItem",
+                    "label": "Alvium Camera",
+                    "tag": 3051,
+                    "alias": "Alvium Camera_3050"
+                },
+                {
+                    "type": "mvAppItemType::mvCombo",
+                    "label": "Binning",
+                    "index": 0,
+                    "tag": "3065",
+                    "alias": "alvium_binning_3050"
+                }
+            ],
+            "instruction": "Average bloc of pixels",
+            "dim": true,
+            "type": "observe"
+        },
+        {
+            "path": [
+                {
+                    "type": "mvAppItemType::mvWindowAppItem",
+                    "label": "Alvium Camera",
+                    "tag": 3051,
+                    "alias": "Alvium Camera_3050"
+                },
+                {
+                    "type": "mvAppItemType::mvGroup",
+                    "label": "",
+                    "index": 3,
+                    "tag": "3068",
+                    "alias": ""
+                },
+                {
+                    "type": "mvAppItemType::mvButton",
+                    "label": "Auto Once",
+                    "index": 0,
+                    "tag": "3069",
+                    "alias": ""
+                }
+            ],
+            "instruction": "Perform an AWB",
+            "dim": true,
+            "type": "observe"
+        },
+        {
+            "path": [
+                {
+                    "type": "mvAppItemType::mvWindowAppItem",
+                    "label": "Alvium Camera",
+                    "tag": 3051,
+                    "alias": "Alvium Camera_3050"
+                },
+                {
+                    "type": "mvAppItemType::mvButton",
+                    "label": "Save Settings (Config)",
+                    "index": 0,
+                    "tag": "3080",
+                    "alias": ""
+                }
+            ],
+            "instruction": "Export settings",
+            "dim": true,
+            "type": "observe"
+        }
+    ]
+}

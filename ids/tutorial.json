@@ -1,0 +1,248 @@
+{
+    "description": "IDS Camera Tutorial",
+    "steps": [
+        {
+            "path": [
+                {
+                    "type": "mvAppItemType::mvWindowAppItem",
+                    "label": "IDS Camera",
+                    "tag": "IDS Camera_621",
+                    "alias": "IDS Camera_621"
+                },
+                {
+                    "type": "mvAppItemType::mvGroup",
+                    "label": "",
+                    "index": 0,
+                    "tag": "623",
+                    "alias": ""
+                },
+                {
+                    "type": "mvAppItemType::mvButton",
+                    "label": "Initialize",
+                    "index": 0,
+                    "tag": "624",
+                    "alias": "ids_init_btn_621"
+                }
+            ],
+            "instruction": "Initialize the camera.",
+            "dim": false,
+            "type": "interact"
+        },
+        {
+            "path": [
+                {
+                    "type": "mvAppItemType::mvWindowAppItem",
+                    "label": "IDS Camera",
+                    "tag": "IDS Camera_621",
+                    "alias": "IDS Camera_621"
+                },
+                {
+                    "type": "mvAppItemType::mvGroup",
+                    "label": "",
+                    "index": 0,
+                    "tag": "623",
+                    "alias": ""
+                },
+                {
+                    "type": "mvAppItemType::mvButton",
+                    "label": "Start",
+                    "index": 0,
+                    "tag": "625",
+                    "alias": "ids_start_btn_621"
+                }
+            ],
+            "instruction": "Start the live video stream \n(it starts automatically upon initialization).",
+            "dim": false,
+            "type": "interact"
+        },
+        {
+            "path": [
+                {
+                    "type": "mvAppItemType::mvWindowAppItem",
+                    "label": "IDS Camera",
+                    "tag": "IDS Camera_621",
+                    "alias": "IDS Camera_621"
+                },
+                {
+                    "type": "mvAppItemType::mvGroup",
+                    "label": "",
+                    "index": 0,
+                    "tag": "623",
+                    "alias": ""
+                },
+                {
+                    "type": "mvAppItemType::mvButton",
+                    "label": "Stop",
+                    "index": 0,
+                    "tag": "626",
+                    "alias": ""
+                }
+            ],
+            "instruction": "Stop the live video stream.",
+            "dim": false,
+            "type": "interact"
+        },
+        {
+            "path": [
+                {
+                    "type": "mvAppItemType::mvWindowAppItem",
+                    "label": "IDS Camera",
+                    "tag": "IDS Camera_621",
+                    "alias": "IDS Camera_621"
+                },
+                {
+                    "type": "mvAppItemType::mvGroup",
+                    "label": "",
+                    "index": 1,
+                    "tag": "628",
+                    "alias": ""
+                },
+                {
+                    "type": "mvAppItemType::mvCombo",
+                    "label": "",
+                    "index": 0,
+                    "tag": "629",
+                    "alias": "ids_trigger_621"
+                }
+            ],
+            "instruction": "Select the trigger mode: 'Video' for a continuous live stream, or 'Trigger' for hardware/software-controlled acquisition.",
+            "dim": false,
+            "type": "interact"
+        },
+        {
+            "path": [
+                {
+                    "type": "mvAppItemType::mvWindowAppItem",
+                    "label": "IDS Camera",
+                    "tag": "IDS Camera_621",
+                    "alias": "IDS Camera_621"
+                },
+                {
+                    "type": "mvAppItemType::mvGroup",
+                    "label": "",
+                    "index": 1,
+                    "tag": "628",
+                    "alias": ""
+                },
+                {
+                    "type": "mvAppItemType::mvButton",
+                    "label": "Trigger",
+                    "index": 0,
+                    "tag": "630",
+                    "alias": ""
+                }
+            ],
+            "instruction": "Capture a single frame using a software trigger (only applicable in Trigger mode).",
+            "dim": false,
+            "type": "interact"
+        },
+        {
+            "path": [
+                {
+                    "type": "mvAppItemType::mvWindowAppItem",
+                    "label": "IDS Camera",
+                    "tag": "IDS Camera_621",
+                    "alias": "IDS Camera_621"
+                },
+                {
+                    "type": "mvAppItemType::mvDragInt",
+                    "label": "Expos. (\u00b5s)",
+                    "index": 0,
+                    "tag": "631",
+                    "alias": "ids_exposure_621"
+                }
+            ],
+            "instruction": "Adjust the camera exposure time.",
+            "dim": false,
+            "type": "interact"
+        },
+        {
+            "path": [
+                {
+                    "type": "mvAppItemType::mvWindowAppItem",
+                    "label": "IDS Camera",
+                    "tag": "IDS Camera_621",
+                    "alias": "IDS Camera_621"
+                },
+                {
+                    "type": "mvAppItemType::mvCollapsingHeader",
+                    "label": "Advanced",
+                    "index": 0,
+                    "tag": "632",
+                    "alias": ""
+                },
+                {
+                    "type": "mvAppItemType::mvGroup",
+                    "label": "",
+                    "index": 0,
+                    "tag": "633",
+                    "alias": ""
+                },
+                {
+                    "type": "mvAppItemType::mvButton",
+                    "label": "Ref frame",
+                    "index": 0,
+                    "tag": "634",
+                    "alias": ""
+                }
+            ],
+            "instruction": "Capture reference frames. The average of 'N Ref' frames will be calculated and subtracted from subsequent frames to eliminate ambient light and noise.",
+            "dim": false,
+            "type": "interact"
+        },
+        {
+            "path": [
+                {
+                    "type": "mvAppItemType::mvWindowAppItem",
+                    "label": "IDS Camera",
+                    "tag": "IDS Camera_621",
+                    "alias": "IDS Camera_621"
+                },
+                {
+                    "type": "mvAppItemType::mvCollapsingHeader",
+                    "label": "Advanced",
+                    "index": 0,
+                    "tag": "632",
+                    "alias": ""
+                },
+                {
+                    "type": "mvAppItemType::mvInputInt",
+                    "label": "N Ref rep",
+                    "index": 0,
+                    "tag": "636",
+                    "alias": ""
+                }
+            ],
+            "instruction": "Set the number of frames to capture and average for dark frame correction.",
+            "dim": false,
+            "type": "interact"
+        },
+        {
+            "path": [
+                {
+                    "type": "mvAppItemType::mvWindowAppItem",
+                    "label": "IDS Camera",
+                    "tag": "IDS Camera_621",
+                    "alias": "IDS Camera_621"
+                },
+                {
+                    "type": "mvAppItemType::mvCollapsingHeader",
+                    "label": "Advanced",
+                    "index": 0,
+                    "tag": "632",
+                    "alias": ""
+                },
+                {
+                    "type": "mvAppItemType::mvCheckbox",
+                    "label": "Correct dark",
+                    "index": 0,
+                    "tag": "637",
+                    "alias": ""
+                }
+            ],
+            "instruction": "Toggle dark frame correction on or off.",
+            "dim": false,
+            "type": "interact"
+        }
+    ]
+}
