@@ -5,7 +5,6 @@ Low-level wrapper for Hamamatsu cameras using pyDCAM.
 from typing import Optional, Tuple, Any
 import numpy as np
 import cv2
-import time
 from loguru import logger
 
 try:
@@ -38,8 +37,45 @@ class Hamamatsu:
         self.buffer_count = 16
         self.readout_speed = "Fastest"
 
-    def init(self) -> bool:
-        """Initialize the camera API, open camera 0, allocate buffers, and start capture."""
+    def _stop_and_release(self) -> None:
+        """Stop capture and release DCAM frame buffers prior to property modification."""
+        self.Camera.dcamcap_stop()
+        try:
+            self.Camera.dcambuf_release()
+            logger.debug("Hamamatsu buffers released for property configuration")
+        except Exception as release_err:
+            logger.debug(f"Precautionary buffer release ignored/failed: {release_err}")
+
+    def _alloc_and_start(self) -> None:
+        """Allocate DCAM frame buffers and start capture."""
+        self.Camera.dcambuf_alloc(self.buffer_count)
+        self.Camera.dcamcap_start()
+
+    def _query_dimensions(self, fallback_binning: int = 1) -> None:
+        """Query current image width and height from DCAM properties."""
+        try:
+            self.width = int(self.Camera.dcamprop_getvalue(DCAMIDPROP.DCAM_IDPROP_IMAGE_WIDTH)[0])
+            self.height = int(self.Camera.dcamprop_getvalue(DCAMIDPROP.DCAM_IDPROP_IMAGE_HEIGHT)[0])
+        except Exception as size_err:
+            if fallback_binning > 1:
+                logger.warning(f"Could not query size after binning change, using default division: {size_err}")
+                self.width = 2048 // fallback_binning
+                self.height = 2048 // fallback_binning
+            else:
+                try:
+                    frame = np.asarray(self.Camera.dcambuf_copyframe())
+                    self.width = frame.shape[1]
+                    self.height = frame.shape[0]
+                except Exception:
+                    pass
+
+    def init(
+        self,
+        exposure_us: float = 50000.0,
+        trigger_mode: Optional[str] = None,
+        binning_factor: Optional[int] = None,
+    ) -> bool:
+        """Initialize the camera API, open camera 0, configure initial properties, allocate buffers, and start capture."""
         if not HAS_PYDCAM:
             logger.error("Hamamatsu initialization failed: pyDCAM library not found.")
             return False
@@ -50,35 +86,28 @@ class Hamamatsu:
         try:
             dcamapi_init()
             self.Camera = HDCAM(0)
-            
+            self.defined = True
+
             # Set readout speed
             if self.readout_speed == "Fastest":
                 self.Camera.readout_speed = DCAMPROPMODEVALUE.DCAMPROP_READOUTSPEED__FASTEST
             else:
                 self.Camera.readout_speed = DCAMPROPMODEVALUE.DCAMPROP_READOUTSPEED__SLOWEST
-                
-            self.Camera.exposure_time = 0.05
+
+            self.set_exposure(exposure_us)
+
+            if trigger_mode is not None:
+                self.set_trigger(trigger_mode, restart_capture=False)
+
+            if binning_factor is not None:
+                self.set_binning(binning_factor, restart_capture=False)
+
             self.Camera.dcambuf_alloc(self.buffer_count)
             self.hwait = self.Camera.dcamwait_open()
             self.Camera.dcamcap_start()
 
-            # Attempt to determine width and height from first frame or DCAM properties
-            try:
-                # Query DCAM image width and height properties
-                self.width = int(self.Camera.dcamprop_getvalue(DCAMIDPROP.DCAM_IDPROP_IMAGE_WIDTH)[0])
-                self.height = int(self.Camera.dcamprop_getvalue(DCAMIDPROP.DCAM_IDPROP_IMAGE_HEIGHT)[0])
-            except Exception:
-                # Try getting a frame to extract size
-                try:
-                    array = self.Camera.dcambuf_copyframe()
-                    frame = np.array(array)
-                    self.width = frame.shape[1]
-                    self.height = frame.shape[0]
-                except Exception:
-                    # Keep defaults if queries fail
-                    pass
+            self._query_dimensions(fallback_binning=binning_factor or 1)
 
-            self.defined = True
             logger.success(f"Hamamatsu camera initialized successfully ({self.width}x{self.height})")
             return True
         except Exception as e:
@@ -97,22 +126,17 @@ class Hamamatsu:
         except Exception as e:
             logger.error(f"Failed to set exposure: {e}")
 
-    def set_trigger(self, mode: str) -> None:
+    def set_trigger(self, mode: str, restart_capture: bool = True) -> None:
         """Set trigger source mode: 'Video' (Internal), 'Trigger' (Hardware/External) or 'Trigger Software' (Software)."""
         if not self.defined or self.Camera is None:
             return
         try:
-            logger.info(f"Stopping capture to change Hamamatsu trigger mode to: {mode}")
-            self.Camera.dcamcap_stop()
-            try:
-                self.Camera.dcambuf_release()
-                logger.debug("Hamamatsu buffers released for property configuration")
-            except Exception as release_err:
-                logger.debug(f"Precautionary buffer release ignored/failed: {release_err}")
+            if restart_capture:
+                logger.info(f"Stopping capture to change Hamamatsu trigger mode to: {mode}")
+                self._stop_and_release()
 
             match mode:
                 case "Video":
-                    # Disable global exposure
                     try:
                         none_val = getattr(DCAMPROPMODEVALUE, 'DCAMPROP_TRIGGER_GLOBALEXPOSURE__NONE', 1)
                         self.Camera.dcamprop_setvalue(
@@ -151,15 +175,6 @@ class Hamamatsu:
                     except Exception as active_err:
                         logger.warning(f"Could not set Hamamatsu trigger active to Edge: {active_err}")
 
-                    # try:
-                    #     self.Camera.dcamprop_setvalue(
-                    #         DCAMIDPROP.DCAM_IDPROP_TRIGGERACTIVE,
-                    #         DCAMPROPMODEVALUE.DCAMPROP_TRIGGERACTIVE__LEVEL
-                    #     )
-                    #     logger.info("Hamamatsu set to Level trigger active mode")
-                    # except Exception as active_err:
-                    #     logger.warning(f"Could not set Hamamatsu trigger active to Level: {active_err}")
-
                     try:
                         global_exposure_val = getattr(DCAMPROPMODEVALUE, 'DCAMPROP_TRIGGER_GLOBALEXPOSURE__GLOBALRESET', 5)
                         self.Camera.dcamprop_setvalue(
@@ -178,7 +193,6 @@ class Hamamatsu:
                     logger.info("Hamamatsu set to hardware Trigger (External) mode with Rising Edge polarity, Edge Active and Global Reset active")
                 
                 case "Trigger Software":
-                    # Disable global exposure
                     try:
                         none_val = getattr(DCAMPROPMODEVALUE, 'DCAMPROP_TRIGGER_GLOBALEXPOSURE__NONE', 1)
                         self.Camera.dcamprop_setvalue(
@@ -195,10 +209,9 @@ class Hamamatsu:
                     self.trigger_mode = True
                     logger.info("Hamamatsu set to software Trigger mode")
 
-            # Reallocate buffer and restart capture
-            self.Camera.dcambuf_alloc(self.buffer_count)
-            self.Camera.dcamcap_start()
-            logger.info("Hamamatsu capture restarted successfully")
+            if restart_capture:
+                self._alloc_and_start()
+                logger.info("Hamamatsu capture restarted successfully")
         except Exception as e:
             logger.error(f"Failed to set Hamamatsu trigger mode: {e}")
 
@@ -230,14 +243,12 @@ class Hamamatsu:
             self.Camera.dcamprop_setvalue(DCAMIDPROP.DCAM_IDPROP_SUBARRAY_HSIZE, width)
             self.Camera.dcamprop_setvalue(DCAMIDPROP.DCAM_IDPROP_SUBARRAY_VSIZE, height)
             
-            # Reallocate buffer if necessary, depending on pyDCAM logic
             try:
                 self.Camera.dcambuf_release()
             except Exception:
                 pass
-            self.Camera.dcambuf_alloc(self.buffer_count)
+            self._alloc_and_start()
             
-            self.Camera.dcamcap_start()
             self.width = width
             self.height = height
             logger.info(f"Hamamatsu AOI set to {width}x{height} at ({x}, {y})")
@@ -246,17 +257,14 @@ class Hamamatsu:
             logger.error(f"Failed to set Hamamatsu AOI: {e}")
             return False
 
-    def set_binning(self, binning_factor: int) -> Tuple[int, int]:
+    def set_binning(self, binning_factor: int, restart_capture: bool = True) -> Tuple[int, int]:
         """Set binning (1, 2, 4). Returns new (width, height)."""
         if not self.defined or self.Camera is None:
             return (self.width, self.height)
         try:
-            logger.info(f"Stopping capture to change Hamamatsu binning to: {binning_factor}x{binning_factor}")
-            self.Camera.dcamcap_stop()
-            try:
-                self.Camera.dcambuf_release()
-            except Exception as release_err:
-                logger.debug(f"Precautionary buffer release ignored/failed: {release_err}")
+            if restart_capture:
+                logger.info(f"Stopping capture to change Hamamatsu binning to: {binning_factor}x{binning_factor}")
+                self._stop_and_release()
 
             match binning_factor:
                 case 1:
@@ -274,28 +282,19 @@ class Hamamatsu:
                 val
             )
 
-            # Reallocate buffer and restart capture
-            self.Camera.dcambuf_alloc(self.buffer_count)
-            self.Camera.dcamcap_start()
-            
-            # Query updated width and height
-            try:
-                self.width = int(self.Camera.dcamprop_getvalue(DCAMIDPROP.DCAM_IDPROP_IMAGE_WIDTH)[0])
-                self.height = int(self.Camera.dcamprop_getvalue(DCAMIDPROP.DCAM_IDPROP_IMAGE_HEIGHT)[0])
-            except Exception as size_err:
-                logger.warning(f"Could not query size after binning change, using default division: {size_err}")
-                self.width = 2048 // binning_factor
-                self.height = 2048 // binning_factor
+            if restart_capture:
+                self._alloc_and_start()
+                self._query_dimensions(fallback_binning=binning_factor)
+                logger.info(f"Hamamatsu binning set to {binning_factor}x{binning_factor} ({self.width}x{self.height})")
 
-            logger.info(f"Hamamatsu binning set to {binning_factor}x{binning_factor} ({self.width}x{self.height})")
             return (self.width, self.height)
         except Exception as e:
             logger.error(f"Failed to set Hamamatsu binning: {e}")
-            try:
-                self.Camera.dcambuf_alloc(self.buffer_count)
-                self.Camera.dcamcap_start()
-            except Exception:
-                pass
+            if restart_capture:
+                try:
+                    self._alloc_and_start()
+                except Exception:
+                    pass
             return (self.width, self.height)
 
     def set_readout_speed(self, speed: str) -> None:
@@ -305,35 +304,41 @@ class Hamamatsu:
             return
         try:
             logger.info(f"Stopping capture to change Hamamatsu readout speed to: {speed}")
-            self.Camera.dcamcap_stop()
-            try:
-                self.Camera.dcambuf_release()
-            except Exception as release_err:
-                logger.debug(f"Precautionary buffer release failed: {release_err}")
+            self._stop_and_release()
 
             if speed == "Fastest":
                 self.Camera.readout_speed = DCAMPROPMODEVALUE.DCAMPROP_READOUTSPEED__FASTEST
             else:
                 self.Camera.readout_speed = DCAMPROPMODEVALUE.DCAMPROP_READOUTSPEED__SLOWEST
 
-            # Reallocate buffer and restart capture
-            self.Camera.dcambuf_alloc(self.buffer_count)
-            self.Camera.dcamcap_start()
+            self._alloc_and_start()
             logger.info(f"Hamamatsu readout speed set to {speed}")
         except Exception as e:
             logger.error(f"Failed to set Hamamatsu readout speed: {e}")
             try:
-                self.Camera.dcambuf_alloc(self.buffer_count)
-                self.Camera.dcamcap_start()
+                self._alloc_and_start()
             except Exception:
                 pass
 
     def close(self) -> None:
         """Stop capture, release buffers, and uninitialize dcam api."""
+        if self.hwait is not None:
+            try:
+                if hasattr(self.hwait, "dcamwait_close"):
+                    self.hwait.dcamwait_close()
+            except Exception:
+                pass
+            self.hwait = None
+
         if self.Camera is not None:
             try:
                 self.Camera.dcamcap_stop()
                 self.Camera.dcambuf_release()
+            except Exception:
+                pass
+            try:
+                if hasattr(self.Camera, "dcamdev_close"):
+                    self.Camera.dcamdev_close()
             except Exception:
                 pass
             self.Camera = None
@@ -362,9 +367,7 @@ class Hamamatsu:
         if not self.defined or self.Camera is None:
             return None
         try:
-            array = self.Camera.dcambuf_copyframe()
-            frame = np.array(array)
-            return frame
+            return np.asarray(self.Camera.dcambuf_copyframe())
         except Exception as e:
             logger.debug(f"Hamamatsu frame capture transient error: {e}")
             return None
@@ -376,6 +379,3 @@ class Hamamatsu:
             self.imgcount += 1
         except Exception as e:
             logger.error(f"Failed to save image: {e}")
-
-
-hamamatsu = Hamamatsu()
