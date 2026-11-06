@@ -1,21 +1,33 @@
 from __future__ import annotations
-from typing import Any, Dict, Tuple, Optional
-import threading
-import queue
-import time
-import os
+
 import json
-import numpy as np
+import os
+import queue
+import threading
+import time
+from typing import Any, Dict, List, Optional, Tuple
+
 import cv2
 import dearpygui.dearpygui as dpg
+import numpy as np
 from loguru import logger
 
-from core.window_base import WindowBase
-from core.input_output_types import IOTypes
 from config.display_scaling import display_scaling
-from core.config_manager import config
 from core.app_state import app_state
+from core.config_manager import config
+from core.input_output_types import IOTypes
+from core.window_base import WindowBase
 from .Alvium import Alvium_cam
+
+_MODULE_DIR = os.path.dirname(__file__)
+_SETTINGS_PATH = os.path.join(_MODULE_DIR, "alvium_settings.json")
+_FFC_MONO_PATH = os.path.join(_MODULE_DIR, "alvium_ffc_mono.npy")
+_FFC_RGB_PATH = os.path.join(_MODULE_DIR, "alvium_ffc_rgb.npy")
+_ROTATION_MAP = {
+    90: cv2.ROTATE_90_CLOCKWISE,
+    180: cv2.ROTATE_180,
+    270: cv2.ROTATE_90_COUNTERCLOCKWISE,
+}
 
 
 class Alvium_win(WindowBase):
@@ -34,128 +46,107 @@ class Alvium_win(WindowBase):
         - Remote automation control via dictionary commands (`IOTypes.CMD_DICT`).
     """
 
-    description: str = "Control Allied Vision Alvium cameras. Supports exposure, gain, white balance, and trigger modes."
+    label: str = "Alvium Camera"
+    win_width: int = display_scaling.scale(320)
+    win_height: int = display_scaling.scale(490)
+    description: str = (
+        "Control Allied Vision Alvium industrial cameras via vmbpy. "
+        "Supports exposure, gain, white balance, binning, FFC, and trigger modes."
+    )
 
-    init_btn_tag: str
-    trigger_tag: str
-    start_btn_tag: str
-    exposure_tag: str
-    gain_tag: str
-    wb_r_tag: str
-    wb_b_tag: str
-    binning_tag: str
-    format_tag: str
-    roi_w_tag: str
-    roi_h_tag: str
-    sat_enabled_tag: str
-    sat_factor_tag: str
-    gamma_enabled_tag: str
-    gamma_val_tag: str
-    ffc_enabled_tag: str
-    ffc_status_tag: str
+    accepted_input_types: list[str] = [IOTypes.CMD_DICT]
+    outputs: dict[str, str] = {
+        "Frame": IOTypes.FRAME,
+    }
+    persistent_fields: list[str] = ["label"]
 
-    cam_running: bool
-    cam_thread: Optional[threading.Thread]
-    alvium_cam: Alvium_cam
-
-    ffc_enabled: bool
-    ffc_matrix_mono: Optional[np.ndarray]
-    ffc_matrix_rgb: Optional[np.ndarray]
-    ffc_gain_mono: Optional[np.ndarray]
-    ffc_gain_rgb: Optional[np.ndarray]
-    _capture_ffc_next: bool
-
-    sat_enabled: bool
-    sat_factor: float
-    gamma_enabled: bool
-    gamma_val: float
-    _gamma_lut_8: Optional[np.ndarray]
-    _gamma_lut_16: Optional[np.ndarray]
-
-    def __init__(
-        self,
-        label: str = "Alvium Camera",
-        win_width: int = display_scaling.scale(300),
-        win_height: int = display_scaling.scale(400),
-        pos: Tuple[int, int] = (10, 10),
-        uuid: Optional[str] = None,
-        outputs: Optional[Dict[str, Any]] = None,
-        visible: bool = True,
-        **kwargs: Any,
-    ) -> None:
+    def __init__(self, **kwargs: Any) -> None:
         """
         Initialize the Alvium Camera window module.
 
         Args:
-            label: Window title displayed in the UI.
-            win_width: Initial window width in pixels.
-            win_height: Initial window height in pixels.
-            pos: Initial (x, y) window position on screen.
-            uuid: Optional unique module identifier.
-            outputs: Optional predefined output connections dictionary.
-            visible: Whether the window is visible upon creation.
             **kwargs: Additional keyword arguments forwarded to WindowBase.
         """
-        super().__init__(
-            label=label,
-            pos=pos,
-            win_width=win_width,
-            win_height=win_height,
-            uuid=uuid,
-            outputs=outputs,
-            visible=visible,
-        )
+        super().__init__(**kwargs)
 
-        self.init_btn_tag = f"alvium_init_btn_{self.UUID}"
-        self.trigger_tag = f"alvium_trigger_{self.UUID}"
-        self.start_btn_tag = f"alvium_start_btn_{self.UUID}"
-        self.exposure_tag = f"alvium_exposure_{self.UUID}"
-        self.gain_tag = f"alvium_gain_{self.UUID}"
-        self.wb_r_tag = f"alvium_wb_r_{self.UUID}"
-        self.wb_b_tag = f"alvium_wb_b_{self.UUID}"
-        self.binning_tag = f"alvium_binning_{self.UUID}"
-        self.format_tag = f"alvium_format_{self.UUID}"
-        self.roi_w_tag = f"alvium_roi_w_{self.UUID}"
-        self.roi_h_tag = f"alvium_roi_h_{self.UUID}"
-        self.sat_enabled_tag = f"alvium_sat_enabled_{self.UUID}"
-        self.sat_factor_tag = f"alvium_sat_factor_{self.UUID}"
-        self.gamma_enabled_tag = f"alvium_gamma_enabled_{self.UUID}"
-        self.gamma_val_tag = f"alvium_gamma_val_{self.UUID}"
-        self.ffc_enabled_tag = f"alvium_ffc_enabled_{self.UUID}"
-        self.ffc_status_tag = f"alvium_ffc_status_{self.UUID}"
+        uid = self.UUID
+        self.init_btn_tag: str = f"alvium_init_btn_{uid}"
+        self.trigger_tag: str = f"alvium_trigger_{uid}"
+        self.start_btn_tag: str = f"alvium_start_btn_{uid}"
+        self.exposure_tag: str = f"alvium_exposure_{uid}"
+        self.gain_tag: str = f"alvium_gain_{uid}"
+        self.wb_r_tag: str = f"alvium_wb_r_{uid}"
+        self.wb_b_tag: str = f"alvium_wb_b_{uid}"
+        self.binning_tag: str = f"alvium_binning_{uid}"
+        self.format_tag: str = f"alvium_format_{uid}"
+        self.roi_w_tag: str = f"alvium_roi_w_{uid}"
+        self.roi_h_tag: str = f"alvium_roi_h_{uid}"
+        self.sat_enabled_tag: str = f"alvium_sat_enabled_{uid}"
+        self.sat_factor_tag: str = f"alvium_sat_factor_{uid}"
+        self.gamma_enabled_tag: str = f"alvium_gamma_enabled_{uid}"
+        self.gamma_val_tag: str = f"alvium_gamma_val_{uid}"
+        self.ffc_enabled_tag: str = f"alvium_ffc_enabled_{uid}"
+        self.ffc_status_tag: str = f"alvium_ffc_status_{uid}"
 
-        self.cam_running = False
-        self.cam_thread = None
-        self.alvium_cam = Alvium_cam()
+        self.cam_running: bool = False
+        self.cam_thread: Optional[threading.Thread] = None
+        self.alvium_cam: Alvium_cam = Alvium_cam()
 
-        self.ffc_enabled = False
-        self.ffc_matrix_mono = None
-        self.ffc_matrix_rgb = None
-        self.ffc_gain_mono = None
-        self.ffc_gain_rgb = None
-        self._capture_ffc_next = False
+        self.ffc_enabled: bool = False
+        self.ffc_matrix_mono: Optional[np.ndarray] = None
+        self.ffc_matrix_rgb: Optional[np.ndarray] = None
+        self.ffc_gain_mono: Optional[np.ndarray] = None
+        self.ffc_gain_rgb: Optional[np.ndarray] = None
+        self._ffc_gain_mono_cached: Optional[np.ndarray] = None
+        self._ffc_gain_rgb_cached: Optional[np.ndarray] = None
+        self._capture_ffc_next: bool = False
 
-        self._persistent_fields = ["label"]
-        self.sat_enabled = False
-        self.sat_factor = 1.0
-        self.gamma_enabled = False
-        self.gamma_val = 1.0
-        self._gamma_lut_8 = None
-        self._gamma_lut_16 = None
-        self.accepted_input_types = [IOTypes.CMD_DICT]
-        self.outputs = {
-            "Frame": IOTypes.FRAME,
-        }
-        self.connections = {k: [] for k in self.outputs}
+        self.sat_enabled: bool = False
+        self.sat_factor: float = 1.0
+        self.gamma_enabled: bool = False
+        self.gamma_val: float = 1.0
+        self._gamma_lut_8: Optional[np.ndarray] = None
+        self._gamma_lut_16: Optional[np.ndarray] = None
 
-        with dpg.window(
-            label=self.label,
-            width=self.win_width,
-            height=self.win_height,
-            pos=self.pos,
-            tag=self.winID,
-            show=self.visible,
-        ):
+        angle = config.get("Cameras", {}).get("Alvium", {}).get("rotation", 0)
+        self._rotation_code: Optional[int] = _ROTATION_MAP.get(angle)
+
+        self._theme_init: Optional[int] = None
+        self._theme_success: Optional[int] = None
+        self._theme_fail: Optional[int] = None
+
+        self._build_ui()
+        self.autosize_window()
+        self.update_permission()
+
+    def _ensure_themes(self) -> None:
+        """Lazily create reusable button status themes to avoid DPG item leaks."""
+        if self._theme_init is None or not dpg.does_item_exist(self._theme_init):
+            with dpg.theme() as self._theme_init:
+                with dpg.theme_component(dpg.mvAll):
+                    dpg.add_theme_color(dpg.mvThemeCol_Button, (255, 165, 0), category=dpg.mvThemeCat_Core)
+                    dpg.add_theme_color(dpg.mvThemeCol_ButtonHovered, (255, 180, 50), category=dpg.mvThemeCat_Core)
+                    dpg.add_theme_color(dpg.mvThemeCol_ButtonActive, (255, 140, 0), category=dpg.mvThemeCat_Core)
+
+        if self._theme_success is None or not dpg.does_item_exist(self._theme_success):
+            with dpg.theme() as self._theme_success:
+                with dpg.theme_component(dpg.mvAll):
+                    dpg.add_theme_color(dpg.mvThemeCol_Button, (0, 100, 0), category=dpg.mvThemeCat_Core)
+                    dpg.add_theme_color(dpg.mvThemeCol_ButtonHovered, (0, 150, 0), category=dpg.mvThemeCat_Core)
+                    dpg.add_theme_color(dpg.mvThemeCol_ButtonActive, (0, 200, 0), category=dpg.mvThemeCat_Core)
+
+        if self._theme_fail is None or not dpg.does_item_exist(self._theme_fail):
+            with dpg.theme() as self._theme_fail:
+                with dpg.theme_component(dpg.mvAll):
+                    dpg.add_theme_color(dpg.mvThemeCol_Button, (150, 0, 0), category=dpg.mvThemeCat_Core)
+                    dpg.add_theme_color(dpg.mvThemeCol_ButtonHovered, (200, 0, 0), category=dpg.mvThemeCat_Core)
+                    dpg.add_theme_color(dpg.mvThemeCol_ButtonActive, (255, 0, 0), category=dpg.mvThemeCat_Core)
+
+    def _build_ui(self) -> None:
+        """Construct DearPyGui widgets for Alvium camera control."""
+        scale = display_scaling.scale
+
+        with self.window():
             with dpg.group(horizontal=True):
                 dpg.add_button(
                     label="Initialize",
@@ -177,11 +168,11 @@ class Alvium_win(WindowBase):
                     default_value="Video",
                     tag=self.trigger_tag,
                     callback=self._set_trigger,
-                    width=display_scaling.scale(100),
+                    width=scale(100),
                 )
                 dpg.add_button(
                     label="Trigger",
-                    callback=lambda *args: self.alvium_cam.trigger(),
+                    callback=lambda: self.alvium_cam.trigger(),
                 )
 
             with dpg.group(horizontal=True):
@@ -195,7 +186,7 @@ class Alvium_win(WindowBase):
                     tag=self.exposure_tag,
                     callback=self._set_exposure,
                     on_enter=True,
-                    width=display_scaling.scale(100),
+                    width=scale(100),
                 )
                 dpg.add_button(label="Auto Once", callback=self._auto_exposure)
 
@@ -208,7 +199,7 @@ class Alvium_win(WindowBase):
                 tag=self.gain_tag,
                 callback=self._set_gain,
                 on_enter=True,
-                width=display_scaling.scale(100),
+                width=scale(100),
             )
 
             dpg.add_combo(
@@ -225,7 +216,7 @@ class Alvium_win(WindowBase):
                 default_value="RGB8 (ISP)",
                 tag=self.format_tag,
                 callback=self._set_format,
-                width=display_scaling.scale(150),
+                width=scale(150),
             )
 
             dpg.add_combo(
@@ -234,14 +225,15 @@ class Alvium_win(WindowBase):
                 default_value="1",
                 tag=self.binning_tag,
                 callback=self._set_binning,
-                width=display_scaling.scale(100),
+                width=scale(100),
             )
 
             dpg.add_separator()
             dpg.add_text("White Balance")
             with dpg.group(horizontal=True):
                 dpg.add_button(
-                    label="Auto Once", callback=self._auto_white_balance
+                    label="Auto Once",
+                    callback=self._auto_white_balance,
                 )
 
             dpg.add_drag_float(
@@ -251,7 +243,7 @@ class Alvium_win(WindowBase):
                 max_value=10.0,
                 tag=self.wb_r_tag,
                 callback=self._set_manual_wb,
-                width=display_scaling.scale(70),
+                width=scale(70),
                 speed=0.01,
             )
             dpg.add_drag_float(
@@ -261,7 +253,7 @@ class Alvium_win(WindowBase):
                 max_value=10.0,
                 tag=self.wb_b_tag,
                 callback=self._set_manual_wb,
-                width=display_scaling.scale(70),
+                width=scale(70),
                 speed=0.01,
             )
 
@@ -272,21 +264,19 @@ class Alvium_win(WindowBase):
                     label="W",
                     tag=self.roi_w_tag,
                     step=-1,
-                    width=display_scaling.scale(70),
+                    width=scale(70),
                 )
                 dpg.add_input_int(
                     label="H",
                     tag=self.roi_h_tag,
                     step=-1,
-                    width=display_scaling.scale(70),
+                    width=scale(70),
                 )
                 dpg.add_button(label="Apply", callback=self._apply_roi)
                 dpg.add_button(label="Max", callback=self._max_roi)
 
             dpg.add_separator()
-            with dpg.collapsing_header(
-                label="Image Processing", default_open=True
-            ):
+            with dpg.collapsing_header(label="Image Processing", default_open=True):
                 dpg.add_checkbox(
                     label="Enable Saturation",
                     tag=self.sat_enabled_tag,
@@ -299,7 +289,7 @@ class Alvium_win(WindowBase):
                     min_value=0.0,
                     max_value=3.0,
                     callback=lambda s, v: setattr(self, "sat_factor", v),
-                    width=display_scaling.scale(150),
+                    width=scale(150),
                 )
 
                 dpg.add_separator()
@@ -316,7 +306,7 @@ class Alvium_win(WindowBase):
                     min_value=0.1,
                     max_value=3.0,
                     callback=self._update_gamma,
-                    width=display_scaling.scale(150),
+                    width=scale(150),
                 )
 
                 dpg.add_separator()
@@ -344,129 +334,62 @@ class Alvium_win(WindowBase):
                 width=-1,
             )
 
-        self.autosize_window()
-        self.update_permission()
-
     def update_permission(self) -> None:
-        """
-        Adjust module permissions and UI visibility based on the application mode.
-        """
-        is_user = app_state.mode == "user"
-
+        """Adjust module permissions and UI visibility based on the application mode."""
+        is_user = getattr(app_state, "mode", "dev") == "user"
         if dpg.does_item_exist(self.winID):
             dpg.configure_item(self.winID, no_close=is_user)
 
     def _init_camera(
         self,
-        sender: Optional[str] = None,
+        sender: Any = None,
         app_data: Any = None,
         user_data: Any = None,
         *args: Any,
+        **kwargs: Any,
     ) -> None:
         """
         Asynchronously initialize the Alvium camera connection, restore saved settings,
         and start frame acquisition.
         """
-        with dpg.theme() as theme_init:
-            with dpg.theme_component(dpg.mvAll):
-                dpg.add_theme_color(
-                    dpg.mvThemeCol_Button,
-                    (255, 165, 0),
-                    category=dpg.mvThemeCat_Core,
-                )
-                dpg.add_theme_color(
-                    dpg.mvThemeCol_ButtonHovered,
-                    (255, 180, 50),
-                    category=dpg.mvThemeCat_Core,
-                )
-                dpg.add_theme_color(
-                    dpg.mvThemeCol_ButtonActive,
-                    (255, 140, 0),
-                    category=dpg.mvThemeCat_Core,
-                )
-            dpg.bind_item_theme(self.init_btn_tag, theme_init)
+        self._ensure_themes()
+        if dpg.does_item_exist(self.init_btn_tag):
+            dpg.bind_item_theme(self.init_btn_tag, self._theme_init)
 
         def init_task() -> None:
             if self.alvium_cam.init():
                 self.load_settings()
                 if self.alvium_cam.had_error:
-                    with dpg.theme() as theme_fail:
-                        with dpg.theme_component(dpg.mvAll):
-                            dpg.add_theme_color(
-                                dpg.mvThemeCol_Button,
-                                (150, 0, 0),
-                                category=dpg.mvThemeCat_Core,
-                            )
-                            dpg.add_theme_color(
-                                dpg.mvThemeCol_ButtonHovered,
-                                (200, 0, 0),
-                                category=dpg.mvThemeCat_Core,
-                            )
-                            dpg.add_theme_color(
-                                dpg.mvThemeCol_ButtonActive,
-                                (255, 0, 0),
-                                category=dpg.mvThemeCat_Core,
-                            )
-                    dpg.bind_item_theme(self.init_btn_tag, theme_fail)
-                    logger.error("Alvium camera configuration failed during settings application")
+                    if dpg.does_item_exist(self.init_btn_tag):
+                        dpg.bind_item_theme(self.init_btn_tag, self._theme_fail)
+                    logger.error(f"[{self.label}] Configuration failed during settings application")
                     return
 
-                with dpg.theme() as theme_success:
-                    with dpg.theme_component(dpg.mvAll):
-                        dpg.add_theme_color(
-                            dpg.mvThemeCol_Button,
-                            (0, 100, 0),
-                            category=dpg.mvThemeCat_Core,
-                        )
-                        dpg.add_theme_color(
-                            dpg.mvThemeCol_ButtonHovered,
-                            (0, 150, 0),
-                            category=dpg.mvThemeCat_Core,
-                        )
-                        dpg.add_theme_color(
-                            dpg.mvThemeCol_ButtonActive,
-                            (0, 200, 0),
-                            category=dpg.mvThemeCat_Core,
-                        )
-                dpg.bind_item_theme(self.init_btn_tag, theme_success)
+                if dpg.does_item_exist(self.init_btn_tag):
+                    dpg.bind_item_theme(self.init_btn_tag, self._theme_success)
 
-                logger.success("Alvium camera initialized")
+                logger.success(f"[{self.label}] Alvium camera initialized")
                 self._start_capture()
             else:
-                with dpg.theme() as theme_fail:
-                    with dpg.theme_component(dpg.mvAll):
-                        dpg.add_theme_color(
-                            dpg.mvThemeCol_Button,
-                            (150, 0, 0),
-                            category=dpg.mvThemeCat_Core,
-                        )
-                        dpg.add_theme_color(
-                            dpg.mvThemeCol_ButtonHovered,
-                            (200, 0, 0),
-                            category=dpg.mvThemeCat_Core,
-                        )
-                        dpg.add_theme_color(
-                            dpg.mvThemeCol_ButtonActive,
-                            (255, 0, 0),
-                            category=dpg.mvThemeCat_Core,
-                        )
-                dpg.bind_item_theme(self.init_btn_tag, theme_fail)
-                logger.error("Alvium camera initialization failed")
+                if dpg.does_item_exist(self.init_btn_tag):
+                    dpg.bind_item_theme(self.init_btn_tag, self._theme_fail)
+                logger.error(f"[{self.label}] Alvium camera initialization failed")
 
         threading.Thread(target=init_task, daemon=True).start()
 
     def _start_capture(
         self,
-        sender: Optional[str] = None,
+        sender: Any = None,
         app_data: Any = None,
         user_data: Any = None,
         *args: Any,
+        **kwargs: Any,
     ) -> None:
         """
         Start the background acquisition thread and initiate camera streaming.
         """
         if not self.alvium_cam.defined or self.alvium_cam.had_error:
-            logger.error("Cannot start capture: Alvium camera is in an error state or is not initialized.")
+            logger.error(f"[{self.label}] Cannot start capture: camera is in error state or uninitialized.")
             return
 
         if self.cam_thread and self.cam_thread.is_alive():
@@ -474,24 +397,9 @@ class Alvium_win(WindowBase):
 
         self.cam_running = True
 
-        with dpg.theme() as theme_active:
-            with dpg.theme_component(dpg.mvAll):
-                dpg.add_theme_color(
-                    dpg.mvThemeCol_Button,
-                    (0, 100, 0),
-                    category=dpg.mvThemeCat_Core,
-                )
-                dpg.add_theme_color(
-                    dpg.mvThemeCol_ButtonHovered,
-                    (0, 150, 0),
-                    category=dpg.mvThemeCat_Core,
-                )
-                dpg.add_theme_color(
-                    dpg.mvThemeCol_ButtonActive,
-                    (0, 200, 0),
-                    category=dpg.mvThemeCat_Core,
-                )
-            dpg.bind_item_theme(self.start_btn_tag, theme_active)
+        self._ensure_themes()
+        if dpg.does_item_exist(self.start_btn_tag):
+            dpg.bind_item_theme(self.start_btn_tag, self._theme_success)
 
         self.alvium_cam.start_streaming()
 
@@ -504,17 +412,19 @@ class Alvium_win(WindowBase):
                     pass
             self.alvium_cam.stop_streaming()
             self.cam_running = False
-            dpg.bind_item_theme(self.start_btn_tag, 0)
+            if dpg.does_item_exist(self.start_btn_tag):
+                dpg.bind_item_theme(self.start_btn_tag, 0)
 
         self.cam_thread = threading.Thread(target=capture_task, daemon=True)
         self.cam_thread.start()
 
     def _stop_capture(
         self,
-        sender: Optional[str] = None,
+        sender: Any = None,
         app_data: Any = None,
         user_data: Any = None,
         *args: Any,
+        **kwargs: Any,
     ) -> None:
         """
         Stop continuous frame acquisition and reset Start button styling.
@@ -524,33 +434,20 @@ class Alvium_win(WindowBase):
         self.cam_running = False
         if self.cam_thread:
             self.cam_thread.join(timeout=1.0)
-        dpg.bind_item_theme(self.start_btn_tag, 0)
+        if dpg.does_item_exist(self.start_btn_tag):
+            dpg.bind_item_theme(self.start_btn_tag, 0)
 
     def _apply_rotation(self, frame: np.ndarray) -> np.ndarray:
         """
         Rotate frame based on camera configuration (Cameras.Alvium.rotation).
-
-        Args:
-            frame: Input image array.
-
-        Returns:
-            np.ndarray: Rotated image array.
         """
-        angle = config.get("Cameras", {}).get("Alvium", {}).get("rotation", 0)
-        if angle == 90:
-            return cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
-        elif angle == 180:
-            return cv2.rotate(frame, cv2.ROTATE_180)
-        elif angle == 270:
-            return cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
+        if self._rotation_code is not None:
+            return cv2.rotate(frame, self._rotation_code)
         return frame
 
     def _trigger_outputs(self, frame: np.ndarray) -> None:
         """
         Process the acquired frame (rotation, FFC, saturation, gamma) and dispatch to outputs.
-
-        Args:
-            frame: Raw camera frame from frame queue.
         """
         frame = self._apply_rotation(frame)
 
@@ -560,41 +457,56 @@ class Alvium_win(WindowBase):
 
         if self.ffc_enabled:
             try:
-                is_color = len(frame.shape) == 3
-                gain = self.ffc_gain_rgb if is_color else self.ffc_gain_mono
+                is_color = frame.ndim == 3
+                base_gain = self.ffc_gain_rgb if is_color else self.ffc_gain_mono
 
-                if gain is not None:
+                if base_gain is not None:
                     dtype = frame.dtype
-                    if frame.shape[:2] != gain.shape[:2]:
-                        gain = cv2.resize(gain, (frame.shape[1], frame.shape[0]))
+                    h, w = frame.shape[:2]
 
                     if is_color:
-                        frame = frame.astype(np.float32) * np.expand_dims(gain, axis=2)
+                        cached = self._ffc_gain_rgb_cached
+                        if cached is None or cached.shape[:2] != (h, w):
+                            resized = cv2.resize(base_gain, (w, h)) if base_gain.shape[:2] != (h, w) else base_gain
+                            cached = np.expand_dims(resized, axis=2)
+                            self._ffc_gain_rgb_cached = cached
                     else:
-                        frame = frame.astype(np.float32) * gain
+                        cached = self._ffc_gain_mono_cached
+                        if cached is None or cached.shape[:2] != (h, w):
+                            cached = cv2.resize(base_gain, (w, h)) if base_gain.shape[:2] != (h, w) else base_gain
+                            self._ffc_gain_mono_cached = cached
+
+                    frame_f = frame.astype(np.float32)
+                    np.multiply(frame_f, cached, out=frame_f)
 
                     is_12bit = "12" in self.alvium_cam.processing_mode
                     max_clip = 4095.0 if is_12bit else (65535.0 if dtype == np.uint16 else 255.0)
-                    frame = np.clip(frame, 0, max_clip).astype(dtype)
+                    np.clip(frame_f, 0.0, max_clip, out=frame_f)
+                    frame = frame_f.astype(dtype)
             except Exception as e:
-                logger.error(f"FFC application failed: {e}")
+                logger.error(f"[{self.label}] FFC application failed: {e}")
 
-        if self.sat_enabled and len(frame.shape) == 3 and frame.shape[2] >= 3:
+        if self.sat_enabled and self.sat_factor != 1.0 and frame.ndim == 3 and frame.shape[2] >= 3:
             try:
                 is_16bit = frame.dtype == np.uint16
                 is_12bit = "12" in self.alvium_cam.processing_mode
                 divisor = 4095.0 if is_12bit else (65535.0 if is_16bit else 255.0)
 
-                hsv = cv2.cvtColor(frame.astype(np.float32) / divisor, cv2.COLOR_BGR2HSV)
-                hsv[:, :, 1] *= self.sat_factor
-                hsv[:, :, 1] = np.clip(hsv[:, :, 1], 0, 1.0)
+                frame_f = frame.astype(np.float32)
+                frame_f *= 1.0 / divisor
+                hsv = cv2.cvtColor(frame_f, cv2.COLOR_BGR2HSV)
+                sat_ch = hsv[:, :, 1]
+                sat_ch *= self.sat_factor
+                np.clip(sat_ch, 0.0, 1.0, out=sat_ch)
 
                 frame_float = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
-                frame = (frame_float * divisor).clip(0, divisor).astype(frame.dtype)
+                frame_float *= divisor
+                np.clip(frame_float, 0.0, divisor, out=frame_float)
+                frame = frame_float.astype(frame.dtype)
             except Exception as e:
-                logger.error(f"Saturation adjustment failed: {e}")
+                logger.error(f"[{self.label}] Saturation adjustment failed: {e}")
 
-        if self.gamma_enabled:
+        if self.gamma_enabled and self.gamma_val != 1.0:
             try:
                 if frame.dtype == np.uint8:
                     if self._gamma_lut_8 is None:
@@ -607,24 +519,29 @@ class Alvium_win(WindowBase):
                     if self._gamma_lut_16 is not None:
                         frame = self._gamma_lut_16[frame]
             except Exception as e:
-                logger.error(f"Gamma correction failed: {e}")
+                logger.error(f"[{self.label}] Gamma correction failed: {e}")
 
         data = (frame, "Alvium")
         for output_key, connected_modules in self.connections.items():
             for module in connected_modules:
                 try:
-                    module.input_cb(data)
+                    module.input_cb(data, data_type=IOTypes.FRAME)
                 except Exception as e:
-                    logger.error(f"Error sending frame to {module}: {e}")
+                    logger.error(f"[{self.label}] Error sending frame to {getattr(module, 'label', 'module')}: {e}")
 
-    def _update_gamma(self, sender: Any, app_data: Any, user_data: Any = None, *args: Any, **kwargs: Any) -> None:
+    def _update_gamma(
+        self,
+        sender: Any = None,
+        app_data: Any = None,
+        user_data: Any = None,
+        *args: Any,
+        **kwargs: Any,
+    ) -> None:
         """
         Recompute 8-bit and 16-bit lookup tables for fast gamma correction.
-
-        Args:
-            app_data: Gamma exponent value (0.1 to 3.0).
         """
-        self.gamma_val = float(app_data)
+        if app_data is not None:
+            self.gamma_val = float(app_data)
         inv_gamma = 1.0 / max(0.1, self.gamma_val)
 
         indices_8 = np.arange(256, dtype=np.float32)
@@ -636,22 +553,26 @@ class Alvium_win(WindowBase):
         indices_16 = np.arange(65536, dtype=np.float32)
         self._gamma_lut_16 = np.clip(((indices_16 / divisor) ** inv_gamma) * divisor, 0, divisor).astype(np.uint16)
 
-    def _request_ffc_capture(self, *args: Any) -> None:
+    def _request_ffc_capture(
+        self,
+        sender: Any = None,
+        app_data: Any = None,
+        user_data: Any = None,
+        *args: Any,
+        **kwargs: Any,
+    ) -> None:
         """
         Flag the next incoming frame for Flat-Field Correction (FFC) reference calculation.
         """
         if not self.cam_running:
-            logger.warning("Camera must be running to take FFC reference")
+            logger.warning(f"[{self.label}] Camera must be running to capture FFC reference")
             return
         self._capture_ffc_next = True
-        logger.info("FFC reference capture requested - point camera at uniform source")
+        logger.info(f"[{self.label}] FFC capture requested - point camera at uniform white source")
 
     def _process_ffc_reference(self, frame: np.ndarray) -> None:
         """
         Calculate and persist flat-field normalization matrix from a uniform illumination frame.
-
-        Args:
-            frame: Input image of uniform background.
         """
         try:
             is_color = len(frame.shape) == 3
@@ -664,8 +585,8 @@ class Alvium_win(WindowBase):
             gray_f = gray.astype(np.float32)
             gray_f = cv2.GaussianBlur(gray_f, (31, 31), 0)
 
-            peak = np.max(gray_f)
-            if peak == 0:
+            peak = float(np.max(gray_f))
+            if peak == 0.0:
                 peak = 1.0
 
             matrix = gray_f / peak
@@ -675,133 +596,192 @@ class Alvium_win(WindowBase):
             if is_color:
                 self.ffc_matrix_rgb = matrix
                 self.ffc_gain_rgb = gain
-                f_path = os.path.join(os.path.dirname(__file__), "alvium_ffc_rgb.npy")
+                self._ffc_gain_rgb_cached = np.expand_dims(gain, axis=2)
+                f_path = _FFC_RGB_PATH
             else:
                 self.ffc_matrix_mono = matrix
                 self.ffc_gain_mono = gain
-                f_path = os.path.join(os.path.dirname(__file__), "alvium_ffc_mono.npy")
+                self._ffc_gain_mono_cached = gain
+                f_path = _FFC_MONO_PATH
 
             np.save(f_path, matrix)
 
             if dpg.does_item_exist(self.ffc_status_tag):
                 dpg.set_value(self.ffc_status_tag, f"OK ({'RGB' if is_color else 'Mono'})")
                 dpg.configure_item(self.ffc_status_tag, color=(100, 255, 100))
-            logger.success(f"FFC {'RGB' if is_color else 'Mono'} reference captured as Grayscale matrix")
+            logger.success(f"[{self.label}] FFC {'RGB' if is_color else 'Mono'} reference captured successfully")
 
         except Exception as e:
-            logger.error(f"FFC processing failed: {e}")
+            logger.error(f"[{self.label}] FFC processing failed: {e}")
             if dpg.does_item_exist(self.ffc_status_tag):
                 dpg.set_value(self.ffc_status_tag, "Error")
                 dpg.configure_item(self.ffc_status_tag, color=(255, 100, 100))
 
-    def _set_trigger(self, sender: Any, app_data: Any, user_data: Any = None, *args: Any) -> None:
-        """
-        Set acquisition trigger mode ("Video" for continuous, "Trigger" for software/hardware trigger).
-        """
+    def _set_trigger(
+        self,
+        sender: Any = None,
+        app_data: Any = None,
+        user_data: Any = None,
+        *args: Any,
+        **kwargs: Any,
+    ) -> None:
+        """Set acquisition trigger mode ("Video" or "Trigger")."""
         if self.alvium_cam.defined:
-            self.alvium_cam.set_trigger_mode(app_data)
+            self.alvium_cam.set_trigger_mode(str(app_data or "Video"))
 
-    def _set_exposure(self, sender: Any, app_data: Any, user_data: Any = None, *args: Any) -> None:
-        """
-        Set sensor exposure time.
-
-        Args:
-            app_data: Exposure time in milliseconds.
-        """
-        if self.alvium_cam.defined:
+    def _set_exposure(
+        self,
+        sender: Any = None,
+        app_data: Any = None,
+        user_data: Any = None,
+        *args: Any,
+        **kwargs: Any,
+    ) -> None:
+        """Set sensor exposure time in milliseconds."""
+        if self.alvium_cam.defined and app_data is not None:
             exposure_us = float(app_data) * 1000.0
             self.alvium_cam.set_exposure(exposure_us)
 
-    def _set_gain(self, sender: Any, app_data: Any, user_data: Any = None, *args: Any) -> None:
-        """
-        Set sensor hardware gain in dB (0-24).
-        """
-        if self.alvium_cam.defined:
+    def _set_gain(
+        self,
+        sender: Any = None,
+        app_data: Any = None,
+        user_data: Any = None,
+        *args: Any,
+        **kwargs: Any,
+    ) -> None:
+        """Set sensor hardware gain in dB (0-24)."""
+        if self.alvium_cam.defined and app_data is not None:
             self.alvium_cam.set_gain(float(app_data))
 
-    def _set_manual_wb(self, sender: Any, app_data: Any, user_data: Any = None, *args: Any) -> None:
-        """
-        Set manual white balance ratios for Red and Blue color channels.
-        """
+    def _set_manual_wb(
+        self,
+        sender: Any = None,
+        app_data: Any = None,
+        user_data: Any = None,
+        *args: Any,
+        **kwargs: Any,
+    ) -> None:
+        """Set manual white balance ratios for Red and Blue color channels."""
         if self.alvium_cam.defined:
             r = dpg.get_value(self.wb_r_tag)
             b = dpg.get_value(self.wb_b_tag)
-            self.alvium_cam.set_manual_white_balance(r, b)
+            self.alvium_cam.set_manual_white_balance(float(r), float(b))
 
-    def _set_format(self, sender: Any, app_data: Any, user_data: Any = None, *args: Any) -> None:
-        """
-        Set pixel format and update bit-depth dependent processing lookup tables.
-        """
-        if self.alvium_cam.defined:
-            self.alvium_cam.set_format(app_data)
+    def _set_format(
+        self,
+        sender: Any = None,
+        app_data: Any = None,
+        user_data: Any = None,
+        *args: Any,
+        **kwargs: Any,
+    ) -> None:
+        """Set pixel format and update lookup tables."""
+        if self.alvium_cam.defined and app_data:
+            self.alvium_cam.set_format(str(app_data))
             self._update_gamma(None, self.gamma_val)
 
-    def _set_binning(self, sender: Any, app_data: Any, user_data: Any = None, *args: Any) -> None:
-        """
-        Configure pixel binning factor and reset ROI to the new sensor maximum.
-        """
-        if self.alvium_cam.defined:
-            self.alvium_cam.set_binning(app_data)
-            self._max_roi()
-
-    def _apply_roi(self, *args: Any) -> None:
-        """
-        Apply requested width and height to sensor Region of Interest (ROI).
-        """
-        if self.alvium_cam.defined:
-            w = dpg.get_value(self.roi_w_tag)
-            h = dpg.get_value(self.roi_h_tag)
-            self.alvium_cam.set_roi(w, h)
+    def _set_binning(
+        self,
+        sender: Any = None,
+        app_data: Any = None,
+        user_data: Any = None,
+        *args: Any,
+        **kwargs: Any,
+    ) -> None:
+        """Configure pixel binning factor and reset ROI to new max."""
+        if self.alvium_cam.defined and app_data:
+            self.alvium_cam.set_binning(str(app_data))
             actual_w, actual_h = self.alvium_cam.get_roi()
             if actual_w > 0 and actual_h > 0:
                 dpg.set_value(self.roi_w_tag, actual_w)
                 dpg.set_value(self.roi_h_tag, actual_h)
 
-    def _max_roi(self, *args: Any) -> None:
-        """
-        Reset sensor Region of Interest (ROI) to maximum available resolution.
-        """
+    def _apply_roi(
+        self,
+        sender: Any = None,
+        app_data: Any = None,
+        user_data: Any = None,
+        *args: Any,
+        **kwargs: Any,
+    ) -> None:
+        """Apply requested width and height to sensor Region of Interest (ROI)."""
+        if self.alvium_cam.defined:
+            w = dpg.get_value(self.roi_w_tag)
+            h = dpg.get_value(self.roi_h_tag)
+            self.alvium_cam.set_roi(int(w), int(h))
+            actual_w, actual_h = self.alvium_cam.get_roi()
+            if actual_w > 0 and actual_h > 0:
+                dpg.set_value(self.roi_w_tag, actual_w)
+                dpg.set_value(self.roi_h_tag, actual_h)
+
+    def _max_roi(
+        self,
+        sender: Any = None,
+        app_data: Any = None,
+        user_data: Any = None,
+        *args: Any,
+        **kwargs: Any,
+    ) -> None:
+        """Reset sensor Region of Interest (ROI) to maximum available resolution."""
         if self.alvium_cam.defined:
             w, h = self.alvium_cam.get_max_roi()
             dpg.set_value(self.roi_w_tag, w)
             dpg.set_value(self.roi_h_tag, h)
             self.alvium_cam.set_roi(w, h)
 
-    def _auto_exposure(self, *args: Any) -> None:
-        """
-        Execute one-shot auto exposure calibration and pull updated exposure to UI.
-        """
+    def _auto_exposure(
+        self,
+        sender: Any = None,
+        app_data: Any = None,
+        user_data: Any = None,
+        *args: Any,
+        **kwargs: Any,
+    ) -> None:
+        """Execute one-shot auto exposure calibration and pull updated value."""
         self.alvium_cam.auto_exposure()
 
         def pull_values() -> None:
             time.sleep(1.0)
             if self.alvium_cam.defined:
                 expos_us = self.alvium_cam.get_exposure()
-                dpg.set_value(self.exposure_tag, round(expos_us / 1000.0, 2))
+                if dpg.does_item_exist(self.exposure_tag):
+                    dpg.set_value(self.exposure_tag, round(expos_us / 1000.0, 2))
 
         threading.Thread(target=pull_values, daemon=True).start()
 
-    def _auto_white_balance(self, *args: Any) -> None:
-        """
-        Execute one-shot auto white balance calibration and pull updated WB to UI.
-        """
+    def _auto_white_balance(
+        self,
+        sender: Any = None,
+        app_data: Any = None,
+        user_data: Any = None,
+        *args: Any,
+        **kwargs: Any,
+    ) -> None:
+        """Execute one-shot auto white balance calibration and pull updated values."""
         self.alvium_cam.auto_white_balance()
 
         def pull_values() -> None:
             time.sleep(1.0)
             if self.alvium_cam.defined:
                 r, b = self.alvium_cam.get_white_balance()
-                dpg.set_value(self.wb_r_tag, round(r, 2))
-                dpg.set_value(self.wb_b_tag, round(b, 2))
+                if dpg.does_item_exist(self.wb_r_tag):
+                    dpg.set_value(self.wb_r_tag, round(r, 2))
+                if dpg.does_item_exist(self.wb_b_tag):
+                    dpg.set_value(self.wb_b_tag, round(b, 2))
 
         threading.Thread(target=pull_values, daemon=True).start()
 
-    def save_settings(self, *args: Any) -> None:
-        """
-        Serialize all active camera and processing parameters to alvium_settings.json.
-        """
+    def save_settings(
+        self,
+        sender: Any = None,
+        app_data: Any = None,
+        user_data: Any = None,
+        *args: Any,
+        **kwargs: Any,
+    ) -> None:
+        """Serialize all active camera and processing parameters to alvium_settings.json."""
         try:
-            f = os.path.join(os.path.dirname(__file__), "alvium_settings.json")
             data = {
                 "exposure": dpg.get_value(self.exposure_tag),
                 "gain": dpg.get_value(self.gain_tag),
@@ -817,20 +797,27 @@ class Alvium_win(WindowBase):
                 "gamma_val": dpg.get_value(self.gamma_val_tag),
                 "ffc_enabled": dpg.get_value(self.ffc_enabled_tag),
             }
-            with open(f, "w") as fh:
+            with open(_SETTINGS_PATH, "w", encoding="utf-8") as fh:
                 json.dump(data, fh, indent=4)
-            logger.success("Alvium settings saved to alvium_settings.json")
+            logger.success(f"[{self.label}] Settings saved to alvium_settings.json")
         except Exception as e:
-            logger.error(f"Failed to save settings: {e}")
+            logger.error(f"[{self.label}] Failed to save settings: {e}")
 
-    def load_settings(self, *args: Any) -> None:
-        """
-        Load persisted parameters from alvium_settings.json and apply to hardware and UI.
-        """
+    def load_settings(
+        self,
+        sender: Any = None,
+        app_data: Any = None,
+        user_data: Any = None,
+        *args: Any,
+        **kwargs: Any,
+    ) -> None:
+        """Load persisted parameters from alvium_settings.json and apply to hardware and UI."""
         try:
-            f = os.path.join(os.path.dirname(__file__), "alvium_settings.json")
-            if os.path.exists(f):
-                with open(f, "r") as fh:
+            angle = config.get("Cameras", {}).get("Alvium", {}).get("rotation", 0)
+            self._rotation_code = _ROTATION_MAP.get(angle)
+
+            if os.path.exists(_SETTINGS_PATH):
+                with open(_SETTINGS_PATH, "r", encoding="utf-8") as fh:
                     data = json.load(fh)
 
                 exposure_val = float(data.get("exposure", 1.0))
@@ -852,7 +839,10 @@ class Alvium_win(WindowBase):
                 rw, rh = self.alvium_cam.get_roi()
                 dpg.set_value(self.roi_w_tag, data.get("roi_w", rw))
                 dpg.set_value(self.roi_h_tag, data.get("roi_h", rh))
-                self.alvium_cam.set_roi(dpg.get_value(self.roi_w_tag), dpg.get_value(self.roi_h_tag))
+                self.alvium_cam.set_roi(
+                    int(dpg.get_value(self.roi_w_tag)),
+                    int(dpg.get_value(self.roi_h_tag)),
+                )
 
                 dpg.set_value(self.wb_r_tag, float(data.get("wb_r", 1.0)))
                 dpg.set_value(self.wb_b_tag, float(data.get("wb_b", 1.0)))
@@ -872,21 +862,20 @@ class Alvium_win(WindowBase):
                 self.ffc_enabled = bool(data.get("ffc_enabled", False))
                 dpg.set_value(self.ffc_enabled_tag, self.ffc_enabled)
 
-                p_mono = os.path.join(os.path.dirname(__file__), "alvium_ffc_mono.npy")
-                p_rgb = os.path.join(os.path.dirname(__file__), "alvium_ffc_rgb.npy")
-
-                status_parts = []
-                if os.path.exists(p_mono):
+                status_parts: list[str] = []
+                if os.path.exists(_FFC_MONO_PATH):
                     try:
-                        self.ffc_matrix_mono = np.load(p_mono)
+                        self.ffc_matrix_mono = np.load(_FFC_MONO_PATH)
                         self.ffc_gain_mono = 1.0 / self.ffc_matrix_mono
+                        self._ffc_gain_mono_cached = self.ffc_gain_mono
                         status_parts.append("Mono")
                     except Exception:
                         pass
-                if os.path.exists(p_rgb):
+                if os.path.exists(_FFC_RGB_PATH):
                     try:
-                        self.ffc_matrix_rgb = np.load(p_rgb)
+                        self.ffc_matrix_rgb = np.load(_FFC_RGB_PATH)
                         self.ffc_gain_rgb = 1.0 / self.ffc_matrix_rgb
+                        self._ffc_gain_rgb_cached = np.expand_dims(self.ffc_gain_rgb, axis=2)
                         status_parts.append("RGB")
                     except Exception:
                         pass
@@ -895,38 +884,19 @@ class Alvium_win(WindowBase):
                     dpg.set_value(self.ffc_status_tag, f"OK ({'+'.join(status_parts)})")
                     dpg.configure_item(self.ffc_status_tag, color=(100, 255, 100))
 
-                logger.info("Restored Alvium settings from config")
+                logger.info(f"[{self.label}] Restored Alvium settings from config")
         except Exception as e:
-            logger.error(f"Failed to load settings: {e}")
+            logger.error(f"[{self.label}] Failed to load settings: {e}")
 
     def is_ready(self) -> bool:
         """
         Check if the camera module is ready to accept commands or frames.
-
-        Returns:
-            bool: Always True for the camera window.
         """
         return True
 
     def input_cb(self, data: Any = None, *args: Any, **kwargs: Any) -> None:
         """
         Handle incoming command dictionary from connected modules or automation scripts.
-
-        Supported command keys:
-            - init (bool): Initialize camera hardware connection.
-            - start (bool): Start continuous acquisition.
-            - stop (bool): Stop acquisition.
-            - trigger (bool): Trigger a single frame.
-            - trigger_cam (bool/dict): Trigger a frame, optionally accepting an `exposure` override.
-            - trigger_mode (str): Set trigger mode ("Video" or "Trigger").
-            - exposure (float/int): Set exposure time in milliseconds.
-            - gain (float/int): Set gain in dB (0-24).
-            - binning (str): Set binning factor ("1", "2", "4", "8").
-            - format (str): Set pixel format.
-            - wb_r, wb_b (float): Set manual white balance ratios.
-            - roi_w, roi_h (int): Set Region of Interest dimensions.
-            - save_settings (bool): Save current configuration to file.
-            - load_settings (bool): Reload configuration from file.
         """
         if data is None and "data" in kwargs:
             data = kwargs["data"]
@@ -939,20 +909,21 @@ class Alvium_win(WindowBase):
             cmd = None
 
         if cmd and isinstance(cmd, dict):
-            if "init" in cmd and cmd["init"]:
+            if cmd.get("init"):
                 self._init_camera()
 
-            if "start" in cmd and cmd["start"]:
+            if cmd.get("start"):
                 self._start_capture()
 
-            if "stop" in cmd and cmd["stop"]:
+            if cmd.get("stop"):
                 self._stop_capture()
 
             if "trigger_cam" in cmd:
-                if isinstance(cmd, dict) and "exposure" in cmd:
+                trig_arg = cmd["trigger_cam"]
+                if isinstance(trig_arg, dict) and "exposure" in trig_arg:
                     def trigger_seq() -> None:
-                        old_exposure = dpg.get_value(self.exposure_tag)
-                        new_exposure = float(cmd["exposure"])
+                        old_exposure = float(dpg.get_value(self.exposure_tag))
+                        new_exposure = float(trig_arg["exposure"])
                         self._set_exposure(None, new_exposure)
                         dpg.set_value(self.exposure_tag, new_exposure)
                         time.sleep(0.05)
@@ -965,58 +936,75 @@ class Alvium_win(WindowBase):
                 else:
                     self.alvium_cam.trigger()
 
-            if "trigger" in cmd:
+            if cmd.get("trigger"):
                 self.alvium_cam.trigger()
 
             if "trigger_mode" in cmd:
-                mode = cmd["trigger_mode"]
+                mode = str(cmd["trigger_mode"])
                 self._set_trigger(None, mode)
-                dpg.set_value(self.trigger_tag, mode)
+                if dpg.does_item_exist(self.trigger_tag):
+                    dpg.set_value(self.trigger_tag, mode)
 
             if "exposure" in cmd and "trigger_cam" not in cmd:
                 val_ms = float(cmd["exposure"])
                 self._set_exposure(None, val_ms)
-                dpg.set_value(self.exposure_tag, val_ms)
+                if dpg.does_item_exist(self.exposure_tag):
+                    dpg.set_value(self.exposure_tag, val_ms)
 
             if "gain" in cmd:
-                val = float(cmd["gain"])
-                self._set_gain(None, val)
-                dpg.set_value(self.gain_tag, val)
+                val_g = float(cmd["gain"])
+                self._set_gain(None, val_g)
+                if dpg.does_item_exist(self.gain_tag):
+                    dpg.set_value(self.gain_tag, val_g)
 
             if "binning" in cmd:
                 val_bin = str(cmd["binning"])
                 self._set_binning(None, val_bin)
-                dpg.set_value(self.binning_tag, val_bin)
+                if dpg.does_item_exist(self.binning_tag):
+                    dpg.set_value(self.binning_tag, val_bin)
 
             if "format" in cmd:
                 val_fmt = str(cmd["format"])
                 self._set_format(None, val_fmt)
-                dpg.set_value(self.format_tag, val_fmt)
+                if dpg.does_item_exist(self.format_tag):
+                    dpg.set_value(self.format_tag, val_fmt)
 
             if "wb_r" in cmd or "wb_b" in cmd:
-                if "wb_r" in cmd:
+                if "wb_r" in cmd and dpg.does_item_exist(self.wb_r_tag):
                     dpg.set_value(self.wb_r_tag, float(cmd["wb_r"]))
-                if "wb_b" in cmd:
+                if "wb_b" in cmd and dpg.does_item_exist(self.wb_b_tag):
                     dpg.set_value(self.wb_b_tag, float(cmd["wb_b"]))
                 self._set_manual_wb(None, None)
 
             if "roi_w" in cmd and "roi_h" in cmd:
-                dpg.set_value(self.roi_w_tag, int(cmd["roi_w"]))
-                dpg.set_value(self.roi_h_tag, int(cmd["roi_h"]))
+                if dpg.does_item_exist(self.roi_w_tag):
+                    dpg.set_value(self.roi_w_tag, int(cmd["roi_w"]))
+                if dpg.does_item_exist(self.roi_h_tag):
+                    dpg.set_value(self.roi_h_tag, int(cmd["roi_h"]))
                 self._apply_roi()
 
-            if "save_settings" in cmd and cmd["save_settings"]:
+            if cmd.get("save_settings"):
                 self.save_settings()
 
-            if "load_settings" in cmd and cmd["load_settings"]:
+            if cmd.get("load_settings"):
                 self.load_settings()
+
+    def on_close(self) -> None:
+        """
+        Stop acquisition and release camera hardware resources upon window closure.
+        """
+        self._stop_capture()
+        if hasattr(self, "alvium_cam") and self.alvium_cam is not None:
+            self.alvium_cam.close()
+        super().on_close()
 
     def close(self) -> None:
         """
         Stop acquisition and release camera hardware resources upon window closing.
         """
         self._stop_capture()
-        self.alvium_cam.close()
+        if hasattr(self, "alvium_cam") and self.alvium_cam is not None:
+            self.alvium_cam.close()
         super().close()
 
 

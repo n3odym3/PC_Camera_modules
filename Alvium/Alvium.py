@@ -21,6 +21,24 @@ class Alvium_cam:
     """
     Low-level driver for Allied Vision Alvium cameras using vmbpy.
     """
+
+    # Pre-resolved processing mode constants for fast frame callback dispatch
+    _MODE_RGB8 = 0
+    _MODE_RAW_COPY = 1      # Mono12 or BayerGR12 (Raw)
+    _MODE_BAYER_BGR = 2     # BayerGR12 (RGB)
+    _MODE_BAYER_RED = 3     # BayerGR12 (Red)
+    _MODE_BAYER_GREEN = 4   # BayerGR12 (Green)
+    _MODE_BAYER_BLUE = 5    # BayerGR12 (Blue)
+
+    _MODE_MAP = {
+        "RGB8 (ISP)": _MODE_RGB8,
+        "Mono12": _MODE_RAW_COPY,
+        "BayerGR12 (Raw)": _MODE_RAW_COPY,
+        "BayerGR12 (RGB)": _MODE_BAYER_BGR,
+        "BayerGR12 (Red)": _MODE_BAYER_RED,
+        "BayerGR12 (Green)": _MODE_BAYER_GREEN,
+        "BayerGR12 (Blue)": _MODE_BAYER_BLUE,
+    }
     
     def __init__(self):
         self.defined = False
@@ -31,6 +49,8 @@ class Alvium_cam:
             'Gain': (0.0, 24.0)
         }
         self.processing_mode = "RGB8 (ISP)"
+        self._mode_code = self._MODE_RGB8
+        self._wb_auto_off = False
         
         self.frame_queue = queue.Queue(maxsize=4)
         self.had_error = False
@@ -125,6 +145,7 @@ class Alvium_cam:
     def set_format(self, mode, restart_stream=True):
         """Set hardware pixel format and software processing mode"""
         self.processing_mode = mode
+        self._mode_code = self._MODE_MAP.get(mode, self._MODE_RGB8)
         if not self.cam: return
         try:
             was_streaming = False
@@ -199,9 +220,6 @@ class Alvium_cam:
     def trigger(self):
         if not self.cam: return
         try:
-            try:
-                self.cam.TriggerSelector.set('FrameStart')
-            except: pass
             self.cam.TriggerSoftware.run()
         except Exception as e:
             logger.error(f"Software trigger failed: {e}")
@@ -278,6 +296,8 @@ class Alvium_cam:
                 # 3. FORCE ROI RESET: Returning to lower binning often leaves the ROI cropped
                 # We need to set Width and Height back to their max values
                 try:
+                    self.cam.OffsetX.set(0)
+                    self.cam.OffsetY.set(0)
                     # Get max possible width/height for the current binning
                     w_max = self.cam.Width.get_range()[1]
                     h_max = self.cam.Height.get_range()[1]
@@ -350,6 +370,7 @@ class Alvium_cam:
         if not self.cam: return
         try:
             self.cam.BalanceWhiteAuto.set('Once')
+            self._wb_auto_off = False
             logger.info("Auto white balance triggered")
         except Exception as e:
             logger.error(f"Auto white balance failed: {e}")
@@ -358,7 +379,9 @@ class Alvium_cam:
     def set_manual_white_balance(self, ratio_r, ratio_b):
         if not self.cam: return
         try:
-            self.cam.BalanceWhiteAuto.set('Off')
+            if not self._wb_auto_off:
+                self.cam.BalanceWhiteAuto.set('Off')
+                self._wb_auto_off = True
             # Red
             self.cam.BalanceRatioSelector.set('Red')
             self.cam.BalanceRatio.set(float(ratio_r))
@@ -417,36 +440,41 @@ class Alvium_cam:
                     else:
                         img = frame.convert_pixel_format(vmbpy.PixelFormat.Mono16).as_numpy_ndarray()
 
-                mode = self.processing_mode
-                
                 # Squeeze the array if it has a useless 1-dimension (like vmbpy often returns: H, W, 1)
-                if len(img.shape) == 3 and img.shape[2] == 1:
+                if img.ndim == 3 and img.shape[2] == 1:
                     img = img.squeeze(-1)
 
-                if mode == "RGB8 (ISP)":
-                    if len(img.shape) == 3 and img.shape[2] >= 3:
-                        # Convert RGB to BGR for OpenCV standard
+                mode_code = self._mode_code
+                if mode_code == self._MODE_RGB8:
+                    if img.ndim == 3 and img.shape[2] >= 3:
+                        # Convert RGB to BGR for OpenCV standard (allocates independent buffer)
                         img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
-                elif "Mono12" in mode:
-                    pass # already 1-channel uint16
-                elif "BayerGR12" in mode:
-                    if "Raw" in mode:
-                        pass # keep mosaiced
                     else:
-                        img = cv2.cvtColor(img, cv2.COLOR_BAYER_GB2BGR)
-                        if "(Red)" in mode:
-                            img = img[:, :, 2] # Extract Red (Index 2 in BGR)
-                        elif "(Green)" in mode:
-                            img = img[:, :, 1] # Extract Green (Index 1 in BGR)
-                        elif "(Blue)" in mode:
-                            img = img[:, :, 0] # Extract Blue (Index 0 in BGR)
+                        img = img.copy()
+                elif mode_code == self._MODE_RAW_COPY:
+                    # Detach from Vimba DMA frame buffer before requeuing frame
+                    img = img.copy()
+                elif mode_code == self._MODE_BAYER_BGR:
+                    img = cv2.cvtColor(img, cv2.COLOR_BAYER_GB2BGR)
+                elif mode_code == self._MODE_BAYER_RED:
+                    bgr = cv2.cvtColor(img, cv2.COLOR_BAYER_GB2BGR)
+                    img = np.ascontiguousarray(bgr[:, :, 2])
+                elif mode_code == self._MODE_BAYER_GREEN:
+                    bgr = cv2.cvtColor(img, cv2.COLOR_BAYER_GB2BGR)
+                    img = np.ascontiguousarray(bgr[:, :, 1])
+                elif mode_code == self._MODE_BAYER_BLUE:
+                    bgr = cv2.cvtColor(img, cv2.COLOR_BAYER_GB2BGR)
+                    img = np.ascontiguousarray(bgr[:, :, 0])
 
                 if self.frame_queue.full():
                     try:
                         self.frame_queue.get_nowait()
                     except queue.Empty:
                         pass
-                self.frame_queue.put(img)
+                try:
+                    self.frame_queue.put_nowait(img)
+                except queue.Full:
+                    pass
                 
         except Exception as e:
             logger.error(f"Frame callback processing error: {e}")
