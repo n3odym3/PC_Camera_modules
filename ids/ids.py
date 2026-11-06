@@ -38,8 +38,49 @@ class IDS:
         self.ColorMode = ueye.IS_CM_MONO12
         self.BitsPerPixel = ueye.INT(16)
         self.BytesPerPixel = int(self.BitsPerPixel / 8)
+        self._pixels_per_line = 0
         self.trigger_mode = False
         self.imgcount = 0
+
+        self.signaled = None
+        self.eventcount = None
+        self._event_id_uint = None
+        self._event_id_size = 0
+        self._wait_param = None
+        self._wait_param_size = 0
+
+    def _allocate_buffers(self) -> bool:
+        """Allocate image memory sequence and inquire pitch."""
+        self.buffers = []
+        for i in range(self.buffer_count):
+            mem_ptr = ueye.c_mem_p()
+            mem_id = ueye.int()
+            ret_alloc = ueye.is_AllocImageMem(
+                self.Camera, self.width, self.height, self.BitsPerPixel, mem_ptr, mem_id
+            )
+            if ret_alloc != ueye.IS_SUCCESS:
+                logger.error(f"Buffer {i} allocation error: code {ret_alloc}")
+                continue
+            ueye.is_AddToSequence(self.Camera, mem_ptr, mem_id)
+            self.buffers.append((mem_ptr, mem_id))
+
+        if not self.buffers:
+            logger.error("Buffer selection failed")
+            return False
+
+        self.ImageMemory, self.MemoryID = self.buffers[0]
+        ueye.is_SetImageMem(self.Camera, self.ImageMemory, self.MemoryID)
+        ueye.is_InquireImageMem(
+            self.Camera,
+            self.ImageMemory,
+            self.MemoryID,
+            ueye.INT(self.width),
+            ueye.INT(self.height),
+            self.BitsPerPixel,
+            self.pitch,
+        )
+        self._pixels_per_line = int(self.pitch.value) // self.BytesPerPixel
+        return True
 
     def init(self):
         """Initialize the camera and allocate buffers"""
@@ -60,23 +101,7 @@ class IDS:
             self.width = int(self.rectAOI.s32Width)
             self.height = int(self.rectAOI.s32Height)
 
-            self.buffers = []
-            for i in range(self.buffer_count):  
-                mem_ptr = ueye.c_mem_p()
-                mem_id = ueye.int()
-                ret_alloc = ueye.is_AllocImageMem(self.Camera, self.width, self.height, self.BitsPerPixel, mem_ptr, mem_id)
-                if ret_alloc != ueye.IS_SUCCESS:
-                    logger.error(f"Buffer {i} allocation error: code {ret_alloc}")
-                    continue
-                ret_seq = ueye.is_AddToSequence(self.Camera, mem_ptr, mem_id)
-                self.buffers.append((mem_ptr, mem_id))
-            
-            if self.buffers:
-                self.ImageMemory, self.MemoryID = self.buffers[0]
-                ueye.is_SetImageMem(self.Camera, self.ImageMemory, self.MemoryID)
-                ueye.is_InquireImageMem(self.Camera, self.ImageMemory, self.MemoryID, ueye.INT(self.width), ueye.INT(self.height), self.BitsPerPixel, self.pitch)
-            else:
-                logger.error("Buffer selection failed")
+            if not self._allocate_buffers():
                 return False
 
             ret = ueye.is_SetColorMode(self.Camera, self.ColorMode)
@@ -232,21 +257,7 @@ class IDS:
         self.height = int(rectAOI.s32Height)
         
         # Re-allocate memory
-        for i in range(self.buffer_count):  
-            mem_ptr = ueye.c_mem_p()
-            mem_id = ueye.int()
-            ret_alloc = ueye.is_AllocImageMem(self.Camera, self.width, self.height, self.BitsPerPixel, mem_ptr, mem_id)
-            if ret_alloc != ueye.IS_SUCCESS:
-                logger.error(f"Buffer {i} allocation error: code {ret_alloc}")
-                continue
-            ueye.is_AddToSequence(self.Camera, mem_ptr, mem_id)
-            self.buffers.append((mem_ptr, mem_id))
-            
-        if self.buffers:
-            self.ImageMemory, self.MemoryID = self.buffers[0]
-            ueye.is_SetImageMem(self.Camera, self.ImageMemory, self.MemoryID)
-            # Update pitch for new memory
-            ueye.is_InquireImageMem(self.Camera, self.ImageMemory, self.MemoryID, ueye.INT(self.width), ueye.INT(self.height), self.BitsPerPixel, self.pitch)
+        self._allocate_buffers()
         
         # Restart live video
         ueye.is_CaptureVideo(self.Camera, ueye.IS_DONT_WAIT)
@@ -274,14 +285,12 @@ class IDS:
             return None
             
         try:
-            array = ueye.get_data(self.ImageMemory, self.width, self.height, self.BitsPerPixel, self.pitch, copy=False)
-            bytes_per_pixel = int(self.BitsPerPixel.value / 8)
-            pixels_per_line = self.pitch.value // bytes_per_pixel
-            
+            w = self.width
+            h = self.height
+            pixels_per_line = self._pixels_per_line or (int(self.pitch.value) // self.BytesPerPixel)
+
+            array = ueye.get_data(self.ImageMemory, w, h, self.BitsPerPixel, self.pitch, copy=False)
             raw_data = np.frombuffer(array, dtype=np.uint16)
-            
-            h = int(self.height)
-            w = int(self.width)
             
             frame = raw_data.reshape((h, pixels_per_line))
             if pixels_per_line != w:
@@ -298,11 +307,20 @@ class IDS:
         self.signaled = ueye.UINT()
         self.eventcount = ueye.UINT()
 
-        param = ueye.IS_INIT_EVENT(nEvent=eventID, bManualReset=True, bInitialState=False)
-        ueye.is_Event(self.Camera, ueye.IS_EVENT_CMD_INIT, param, ueye.sizeof(param))
+        init_param = ueye.IS_INIT_EVENT(nEvent=eventID, bManualReset=True, bInitialState=False)
+        ueye.is_Event(self.Camera, ueye.IS_EVENT_CMD_INIT, init_param, ueye.sizeof(init_param))
 
-        param = ueye.UINT(eventID)
-        ueye.is_Event(self.Camera, ueye.IS_EVENT_CMD_ENABLE, param, ueye.sizeof(param))
+        self._event_id_uint = ueye.UINT(eventID)
+        self._event_id_size = ueye.sizeof(self._event_id_uint)
+        ueye.is_Event(self.Camera, ueye.IS_EVENT_CMD_ENABLE, self._event_id_uint, self._event_id_size)
+
+        self._wait_param = ueye.IS_WAIT_EVENT(
+            nEvent=eventID,
+            nTimeoutMilliseconds=100,
+            nSignaled=self.signaled,
+            nSetCount=self.eventcount,
+        )
+        self._wait_param_size = ueye.sizeof(self._wait_param)
 
     def check_event(self, timeout_ms=100):
         """
@@ -315,12 +333,18 @@ class IDS:
         Returns:
             bool: True if a frame event is detected, False otherwise.
         """
-        eventID = ueye.IS_SET_EVENT_FRAME
-        param = ueye.IS_WAIT_EVENT(nEvent=eventID, nTimeoutMilliseconds=timeout_ms, nSignaled=self.signaled, nSetCount=self.eventcount)
-        ret = ueye.is_Event(self.Camera, ueye.IS_EVENT_CMD_WAIT, param, ueye.sizeof(param))
+        wait_param = self._wait_param
+        if wait_param is None:
+            self.set_frame_event()
+            wait_param = self._wait_param
+
+        if wait_param.nTimeoutMilliseconds != timeout_ms:
+            wait_param.nTimeoutMilliseconds = timeout_ms
+
+        ret = ueye.is_Event(self.Camera, ueye.IS_EVENT_CMD_WAIT, wait_param, self._wait_param_size)
 
         if ret == ueye.IS_SUCCESS:
-            ueye.is_Event(self.Camera, ueye.IS_EVENT_CMD_RESET, param, ueye.sizeof(param))
+            ueye.is_Event(self.Camera, ueye.IS_EVENT_CMD_RESET, wait_param, self._wait_param_size)
             return True
         else:
             return False
@@ -330,5 +354,3 @@ class IDS:
 
         cv2.imwrite(f"IMG{self.imgcount}.png", frame, [cv2.IMWRITE_PNG_COMPRESSION, 0])
         self.imgcount += 1
-
-ids = IDS()

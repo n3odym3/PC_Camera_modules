@@ -21,6 +21,10 @@ Controls **IDS Imaging Development Systems** industrial cameras using the `pyuey
   - Subtracts background noise in real-time.
   - Applies dynamic offset correction for pixels below the `Dark threshold`.
 - **Area of Interest (AOI) / Resolution**: Dynamically update sensor width and height (clamped to even pixel dimensions) with automatic DMA memory reallocation.
+- **Flat-Field Correction (FFC)**:
+  - Take reference frame from uniform illumination source to correct vignetting and non-uniform illumination.
+  - Generates normalization and gain matrices persisted to `ids_ffc_mono.npy` and `ids_ffc_rgb.npy`.
+  - Automatic interpolation when sensor AOI changes.
 - **Rotation**: Configurable image orientation via `config.Cameras.IDS.rotation` (0°, 90°, 180°, 270°).
 
 ---
@@ -44,3 +48,5 @@ The module can be automated by sending dictionary commands to its input:
 | `start_dark_ref`| `bool` | Initiates the dark reference capture sequence. |
 | `n_frames` | `int` | Sets the number of frames to average for dark reference. |
 | `width`, `height` | `int` | Adjusts sensor AOI dimensions (even pixel values required). |
+| `ffc_enabled` | `bool` | Enables or disables Flat-Field Correction. |
+| `capture_ffc` | `bool` | Captures next frame as FFC reference matrix. |
