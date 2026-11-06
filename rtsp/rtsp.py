@@ -63,6 +63,11 @@ class Rtsp:
             if not self.cap.isOpened():
                 self.cap = None
                 return False, "VideoCapture could not open RTSP source"
+
+            try:
+                self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            except Exception:
+                pass
                 
             self.width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
             self.height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
@@ -87,14 +92,28 @@ class Rtsp:
                 self.cap = None
             return False, str(e)
 
+    def grab(self) -> bool:
+        """
+        Grab the next frame from the stream without decoding it.
+        Used in Trigger mode to keep the RTSP buffer fresh with minimal CPU load.
+        """
+        cap = self.cap
+        if cap is not None and cap.isOpened():
+            try:
+                return bool(cap.grab())
+            except Exception as e:
+                logger.error(f"Error grabbing frame from RTSP stream: {e}")
+        return False
+
     def read(self):
         """
-        Read a single frame from the stream.
+        Read and decode a single frame from the stream.
         Returns (success, frame)
         """
-        if self.cap and self.cap.isOpened():
+        cap = self.cap
+        if cap is not None and cap.isOpened():
             try:
-                ret, frame = self.cap.read()
+                ret, frame = cap.read()
                 if ret and frame is not None:
                     return True, frame
             except Exception as e:
@@ -103,10 +122,11 @@ class Rtsp:
 
     def close(self) -> None:
         """Release the capture stream."""
-        if self.cap:
+        cap = self.cap
+        if cap is not None:
+            self.cap = None
             try:
-                self.cap.release()
+                cap.release()
             except Exception as e:
                 logger.error(f"Error releasing RTSP stream: {e}")
-            self.cap = None
-        logger.info("RTSP connection closed.")
+            logger.info("RTSP connection closed.")

@@ -1,18 +1,26 @@
 from __future__ import annotations
-from typing import Any, Dict, Tuple, Optional
+
 import threading
 import time
-import numpy as np
+from typing import Any, Optional
+
 import cv2
 import dearpygui.dearpygui as dpg
+import numpy as np
 from loguru import logger
 
-from core.window_base import WindowBase
-from core.input_output_types import IOTypes
 from config.display_scaling import display_scaling
-from core.config_manager import config
 from core.app_state import app_state
+from core.config_manager import config
+from core.input_output_types import IOTypes
+from core.window_base import WindowBase
 from .rtsp import Rtsp
+
+_ROTATION_MAP = {
+    90: cv2.ROTATE_90_CLOCKWISE,
+    180: cv2.ROTATE_180,
+    270: cv2.ROTATE_90_COUNTERCLOCKWISE,
+}
 
 
 class Rtsp_win(WindowBase):
@@ -27,115 +35,74 @@ class Rtsp_win(WindowBase):
         - Remote automation control via dictionary commands (`IOTypes.CMD_DICT`).
     """
 
-    description: str = "Control RTSP network IP cameras. Supports credentials, continuous/trigger modes, and auto-reconnection."
+    label: str = "RTSP Camera"
+    win_width: int = display_scaling.scale(320)
+    win_height: int = display_scaling.scale(320)
+    description: str = (
+        "Control RTSP network IP cameras. Supports credentials, continuous/trigger modes, and auto-reconnection."
+    )
 
-    url_input_tag: str
-    user_input_tag: str
-    password_input_tag: str
-    connect_btn_tag: str
-    camstatus_tag: str
-    caminfo_tag: str
-    mode_tag: str
-    trigger_btn_tag: str
+    accepted_input_types: list[str] = [IOTypes.CMD_DICT]
+    outputs: dict[str, str] = {
+        "Color Frame (BGR)": IOTypes.FRAME,
+    }
+    persistent_fields: list[str] = [
+        "label",
+        "rtsp_url",
+        "rtsp_user",
+        "rtsp_password",
+        "acquisition_mode",
+    ]
 
-    cam_running: bool
-    cam_thread: Optional[threading.Thread]
-    acquisition_mode: str
-    trigger_requested: bool
-
-    rtsp_url: str
-    rtsp_user: str
-    rtsp_password: str
-
-    rtsp: Rtsp
-
-    def __init__(
-        self,
-        label: str = "RTSP Camera",
-        win_width: int = display_scaling.scale(320),
-        win_height: int = display_scaling.scale(320),
-        pos: Tuple[int, int] = (100, 100),
-        uuid: Optional[str] = None,
-        outputs: Optional[Dict[str, Any]] = None,
-        visible: bool = True,
-        **kwargs: Any,
-    ) -> None:
+    def __init__(self, **kwargs: Any) -> None:
         """
         Initialize the RTSP Camera window module.
 
         Args:
-            label: Window title displayed in the UI.
-            win_width: Initial window width in pixels.
-            win_height: Initial window height in pixels.
-            pos: Initial (x, y) window position on screen.
-            uuid: Optional unique module identifier.
-            outputs: Optional predefined output connections dictionary.
-            visible: Whether the window is visible upon creation.
             **kwargs: Additional keyword arguments forwarded to WindowBase.
         """
-        # Define persistent fields first so super().__init__ loads them from kwargs
-        self._persistent_fields = ["label", "rtsp_url", "rtsp_user", "rtsp_password", "acquisition_mode"]
+        super().__init__(**kwargs)
 
-        # Default values if not present in kwargs (deserialization)
-        self.rtsp_url = ""
-        self.rtsp_user = ""
-        self.rtsp_password = ""
-        self.acquisition_mode = "continuous"
+        uid = self.UUID
+        self.url_input_tag: str = f"rtsp_url_input_{uid}"
+        self.user_input_tag: str = f"rtsp_user_input_{uid}"
+        self.password_input_tag: str = f"rtsp_password_input_{uid}"
+        self.connect_btn_tag: str = f"rtsp_connect_{uid}"
+        self.camstatus_tag: str = f"rtsp_status_{uid}"
+        self.caminfo_tag: str = f"rtsp_info_{uid}"
+        self.mode_tag: str = f"rtsp_mode_{uid}"
+        self.trigger_btn_tag: str = f"rtsp_trigger_{uid}"
 
-        super().__init__(
-            label=label,
-            pos=pos,
-            win_width=win_width,
-            win_height=win_height,
-            uuid=uuid,
-            outputs=outputs,
-            visible=visible,
-            **kwargs,
-        )
+        self.rtsp_url: str = str(getattr(self, "rtsp_url", None) or "")
+        self.rtsp_user: str = str(getattr(self, "rtsp_user", None) or "")
+        self.rtsp_password: str = str(getattr(self, "rtsp_password", None) or "")
+        self.acquisition_mode: str = str(getattr(self, "acquisition_mode", None) or "continuous")
 
-        self.url_input_tag = f"rtsp_url_input_{self.UUID}"
-        self.user_input_tag = f"rtsp_user_input_{self.UUID}"
-        self.password_input_tag = f"rtsp_password_input_{self.UUID}"
-        self.connect_btn_tag = f"rtsp_connect_{self.UUID}"
-        self.camstatus_tag = f"rtsp_status_{self.UUID}"
-        self.caminfo_tag = f"rtsp_info_{self.UUID}"
-        self.mode_tag = f"rtsp_mode_{self.UUID}"
-        self.trigger_btn_tag = f"rtsp_trigger_{self.UUID}"
+        self.cam_running: bool = False
+        self.cam_thread: Optional[threading.Thread] = None
+        self.trigger_requested: bool = False
+        self.rtsp: Rtsp = Rtsp()
 
-        self.cam_running = False
-        self.cam_thread = None
-        self.trigger_requested = False
-
-        self.rtsp = Rtsp()
-
-        self.accepted_input_types = [IOTypes.CMD_DICT]
-        self.outputs = {
-            "Color Frame (BGR)": IOTypes.FRAME,
-        }
-        self.connections = {k: [] for k in self.outputs}
+        angle = config.get("Cameras", {}).get("RTSP", {}).get("rotation", 0)
+        self._rotation_code: Optional[int] = _ROTATION_MAP.get(angle)
+        self._source_name: str = f"RTSPCam_{self.UUID[:8]}"
 
         self._build_ui()
+        self.autosize_window()
         self.update_permission()
 
     def _build_ui(self) -> None:
-        """
-        Construct DearPyGui widgets for stream URL, credentials, connection, and acquisition mode.
-        """
-        with dpg.window(
-            label=self.label,
-            width=self.win_width,
-            height=self.win_height,
-            pos=self.pos,
-            tag=self.winID,
-            show=self.visible,
-        ):
+        """Construct DearPyGui widgets for stream URL, credentials, connection, and acquisition mode."""
+        scale = display_scaling.scale
+
+        with self.window():
             dpg.add_text("RTSP Connection Settings", color=(150, 200, 150))
 
             dpg.add_input_text(
                 label="Stream URL",
                 default_value=self.rtsp_url,
                 tag=self.url_input_tag,
-                callback=self._on_url_changed,
+                callback=lambda s, a: setattr(self, "rtsp_url", a.strip()),
                 hint="192.168.1.100:554/stream1",
             )
 
@@ -143,7 +110,7 @@ class Rtsp_win(WindowBase):
                 label="Username",
                 default_value=self.rtsp_user,
                 tag=self.user_input_tag,
-                callback=self._on_user_changed,
+                callback=lambda s, a: setattr(self, "rtsp_user", a),
                 hint="admin",
             )
 
@@ -151,7 +118,7 @@ class Rtsp_win(WindowBase):
                 label="Password",
                 default_value=self.rtsp_password,
                 tag=self.password_input_tag,
-                callback=self._on_password_changed,
+                callback=lambda s, a: setattr(self, "rtsp_password", a),
                 password=True,
                 hint="password",
             )
@@ -185,7 +152,7 @@ class Rtsp_win(WindowBase):
                     default_value="Continuous" if self.acquisition_mode == "continuous" else "Trigger",
                     tag=self.mode_tag,
                     callback=self._on_mode_changed,
-                    width=display_scaling.scale(120),
+                    width=scale(120),
                 )
                 dpg.add_button(
                     label="Trigger Frame",
@@ -195,46 +162,19 @@ class Rtsp_win(WindowBase):
                     width=-1,
                 )
 
-        self.autosize_window()
-
     def update_permission(self) -> None:
-        """
-        Adjust module permissions and UI visibility based on the application mode.
-        """
+        """Adjust module permissions and UI visibility based on the application mode."""
         is_user = app_state.mode == "user"
-
         if dpg.does_item_exist(self.winID):
             dpg.configure_item(self.winID, no_close=is_user)
 
-    def _on_url_changed(self, sender: Any, app_data: str, *args: Any, **kwargs: Any) -> None:
-        """
-        Update stored RTSP stream URL from user input.
-        """
-        self.rtsp_url = app_data.strip()
-
-    def _on_user_changed(self, sender: Any, app_data: str, *args: Any, **kwargs: Any) -> None:
-        """
-        Update stored RTSP username from user input.
-        """
-        self.rtsp_user = app_data
-
-    def _on_password_changed(self, sender: Any, app_data: str, *args: Any, **kwargs: Any) -> None:
-        """
-        Update stored RTSP password from user input.
-        """
-        self.rtsp_password = app_data
-
-    def _toggle_password_visibility(self, sender: Any, app_data: bool, *args: Any, **kwargs: Any) -> None:
-        """
-        Toggle password input field masking on or off.
-        """
+    def _toggle_password_visibility(self, sender: Any = None, app_data: bool = False, *args: Any, **kwargs: Any) -> None:
+        """Toggle password input field masking on or off."""
         if dpg.does_item_exist(self.password_input_tag):
             dpg.configure_item(self.password_input_tag, password=not app_data)
 
-    def _on_mode_changed(self, sender: Any, app_data: str, *args: Any, **kwargs: Any) -> None:
-        """
-        Switch between Continuous streaming and software-Triggered frame acquisition.
-        """
+    def _on_mode_changed(self, sender: Any = None, app_data: str = "Continuous", *args: Any, **kwargs: Any) -> None:
+        """Switch between Continuous streaming and software-Triggered frame acquisition."""
         if app_data == "Continuous":
             self.acquisition_mode = "continuous"
             if dpg.does_item_exist(self.trigger_btn_tag):
@@ -245,24 +185,18 @@ class Rtsp_win(WindowBase):
                 dpg.configure_item(self.trigger_btn_tag, enabled=True)
 
     def _on_trigger(self, *args: Any, **kwargs: Any) -> None:
-        """
-        Request emission of the next grabbed frame in Trigger mode.
-        """
+        """Request emission of the next grabbed frame in Trigger mode."""
         self.trigger_requested = True
 
     def _toggle_connection(self, *args: Any, **kwargs: Any) -> None:
-        """
-        Toggle camera connection state (Connect/Disconnect button callback).
-        """
+        """Toggle camera connection state (Connect/Disconnect button callback)."""
         if self.cam_running:
             self.disconnect_camera()
         else:
             self.connect_camera()
 
     def connect_camera(self) -> None:
-        """
-        Start the background acquisition thread and attempt to open the RTSP stream.
-        """
+        """Start the background acquisition thread and attempt to open the RTSP stream."""
         if self.cam_thread and self.cam_thread.is_alive():
             self.cam_running = False
             self.cam_thread.join(timeout=1.0)
@@ -278,7 +212,6 @@ class Rtsp_win(WindowBase):
             user = self.rtsp_user
             password = self.rtsp_password
 
-            # Connect (this can block for a few seconds if camera is unreachable)
             ret, info = self.rtsp.init(url, user, password)
 
             if not ret:
@@ -300,7 +233,16 @@ class Rtsp_win(WindowBase):
 
             reconnect_attempts = 0
             while self.cam_running:
-                ret_read, frame = self.rtsp.read()
+                if self.acquisition_mode == "trigger" and not self.trigger_requested:
+                    ok_grab = self.rtsp.grab()
+                    if ok_grab:
+                        reconnect_attempts = 0
+                        time.sleep(0.005)
+                        continue
+                    ret_read, frame = False, None
+                else:
+                    ret_read, frame = self.rtsp.read()
+
                 if ret_read and frame is not None:
                     reconnect_attempts = 0
                     if self.acquisition_mode == "continuous":
@@ -308,7 +250,6 @@ class Rtsp_win(WindowBase):
                     elif self.acquisition_mode == "trigger" and self.trigger_requested:
                         self.trigger_requested = False
                         self.trigger_cb(frame)
-                    # Small sleep to prevent pegging CPU when reading very fast (e.g. if local file / loopback)
                     time.sleep(0.005)
                 else:
                     if not self.cam_running:
@@ -318,7 +259,6 @@ class Rtsp_win(WindowBase):
                         dpg.set_value(self.camstatus_tag, "Status: Reconnecting...")
                     self.rtsp.close()
 
-                    # Sleep before reconnecting to prevent infinite fast-looping
                     time.sleep(1.0)
                     if not self.cam_running:
                         break
@@ -343,14 +283,11 @@ class Rtsp_win(WindowBase):
         self.cam_thread.start()
 
     def disconnect_camera(self) -> None:
-        """
-        Stop frame acquisition and release the RTSP stream connection.
-        """
+        """Stop frame acquisition and release the RTSP stream connection."""
         self.cam_running = False
-        # release VideoCapture to interrupt any blocked reads
-        self.rtsp.close()
         if self.cam_thread and self.cam_thread.is_alive() and threading.current_thread() != self.cam_thread:
             self.cam_thread.join(timeout=1.0)
+        self.rtsp.close()
 
         if dpg.does_item_exist(self.connect_btn_tag):
             dpg.configure_item(self.connect_btn_tag, label="Connect")
@@ -369,13 +306,8 @@ class Rtsp_win(WindowBase):
         Returns:
             np.ndarray: Rotated image array.
         """
-        angle = config.get("Cameras", {}).get("RTSP", {}).get("rotation", 0)
-        if angle == 90:
-            return cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
-        elif angle == 180:
-            return cv2.rotate(frame, cv2.ROTATE_180)
-        elif angle == 270:
-            return cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
+        if self._rotation_code is not None:
+            return cv2.rotate(frame, self._rotation_code)
         return frame
 
     def trigger_cb(self, frame: cv2.Mat | np.ndarray) -> None:
@@ -386,14 +318,14 @@ class Rtsp_win(WindowBase):
             frame: Raw or rotated image frame from the RTSP stream.
         """
         frame = self._apply_rotation(frame)
-        frame_tuple = (frame, f"RTSPCam_{self.UUID[:8]}")
+        data = (frame, self._source_name)
         output_key = "Color Frame (BGR)"
 
         connected_modules = list(self.connections.get(output_key, []))
         for module in connected_modules:
             try:
                 if hasattr(module, "input_cb"):
-                    module.input_cb(data=frame_tuple, data_type=IOTypes.FRAME)
+                    module.input_cb(data=data, data_type=IOTypes.FRAME)
             except Exception as e:
                 logger.error(f"RTSP Camera emit error: {e}")
 
@@ -423,39 +355,41 @@ class Rtsp_win(WindowBase):
         else:
             cmd = None
 
-        if cmd and isinstance(cmd, dict):
-            if "url" in cmd:
-                self.rtsp_url = str(cmd["url"]).strip()
-                if dpg.does_item_exist(self.url_input_tag):
-                    dpg.set_value(self.url_input_tag, self.rtsp_url)
+        if not cmd or not isinstance(cmd, dict):
+            return
 
-            if "user" in cmd:
-                self.rtsp_user = str(cmd["user"])
-                if dpg.does_item_exist(self.user_input_tag):
-                    dpg.set_value(self.user_input_tag, self.rtsp_user)
+        if "url" in cmd:
+            self.rtsp_url = str(cmd["url"]).strip()
+            if dpg.does_item_exist(self.url_input_tag):
+                dpg.set_value(self.url_input_tag, self.rtsp_url)
 
-            if "password" in cmd:
-                self.rtsp_password = str(cmd["password"])
-                if dpg.does_item_exist(self.password_input_tag):
-                    dpg.set_value(self.password_input_tag, self.rtsp_password)
+        if "user" in cmd:
+            self.rtsp_user = str(cmd["user"])
+            if dpg.does_item_exist(self.user_input_tag):
+                dpg.set_value(self.user_input_tag, self.rtsp_user)
 
-            if "connect" in cmd and cmd["connect"]:
-                if not self.cam_running:
-                    self.connect_camera()
+        if "password" in cmd:
+            self.rtsp_password = str(cmd["password"])
+            if dpg.does_item_exist(self.password_input_tag):
+                dpg.set_value(self.password_input_tag, self.rtsp_password)
 
-            if "disconnect" in cmd and cmd["disconnect"]:
-                if self.cam_running:
-                    self.disconnect_camera()
+        if "connect" in cmd and cmd["connect"]:
+            if not self.cam_running:
+                self.connect_camera()
 
-            if "mode" in cmd:
-                mode_str = str(cmd["mode"]).capitalize()
-                if mode_str in ("Continuous", "Trigger"):
-                    self._on_mode_changed(None, mode_str)
-                    if dpg.does_item_exist(self.mode_tag):
-                        dpg.set_value(self.mode_tag, mode_str)
+        if "disconnect" in cmd and cmd["disconnect"]:
+            if self.cam_running:
+                self.disconnect_camera()
 
-            if cmd.get("trigger") or cmd.get("trigger_cam"):
-                self._on_trigger()
+        if "mode" in cmd:
+            mode_str = str(cmd["mode"]).capitalize()
+            if mode_str in ("Continuous", "Trigger"):
+                self._on_mode_changed(None, mode_str)
+                if dpg.does_item_exist(self.mode_tag):
+                    dpg.set_value(self.mode_tag, mode_str)
+
+        if cmd.get("trigger") or cmd.get("trigger_cam"):
+            self._on_trigger()
 
     def is_ready(self) -> bool:
         """
@@ -466,27 +400,14 @@ class Rtsp_win(WindowBase):
         """
         return True
 
-    def is_outputs_ready(self) -> bool:
-        """
-        Check if downstream modules connected to this window are ready.
-
-        Returns:
-            bool: Always True for the camera stream.
-        """
-        return True
-
     def on_close(self) -> None:
-        """
-        Cleanup logic executed before window closure.
-        """
+        """Cleanup logic executed before window closure."""
         self.disconnect_camera()
         super().on_close()
 
     def close(self) -> None:
-        """
-        Stop acquisition, release stream resources, and unregister module.
-        """
-        self.disconnect_camera()
+        """Stop acquisition, release stream resources, and unregister module."""
+        self.on_close()
         super().close()
 
 
