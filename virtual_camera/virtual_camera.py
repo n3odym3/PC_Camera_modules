@@ -137,29 +137,30 @@ class VirtualCameraEngine:
             return False
 
         try:
-            # Handle color channels
-            if img.ndim == 2:
-                # Grayscale -> BGR
-                proc_img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
-            elif img.ndim == 3:
-                channels = img.shape[2]
-                if channels == 4:
-                    proc_img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
-                elif channels == 1:
-                    proc_img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
-                else:
-                    proc_img = img
-            else:
-                return False
+            proc_img = img
 
-            # Ensure 8-bit depth
-            if proc_img.dtype != np.uint8:
-                proc_img = cv2.normalize(proc_img, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U)
-
-            # Resize if necessary
+            # 1. Resize first while channel count is minimal
             h, w = proc_img.shape[:2]
             if w != self.width or h != self.height:
                 proc_img = cv2.resize(proc_img, (self.width, self.height), interpolation=cv2.INTER_LINEAR)
+
+            # 2. Ensure 8-bit depth before expanding channels
+            if proc_img.dtype != np.uint8:
+                proc_img = cv2.normalize(proc_img, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U)
+
+            # 3. Convert to 3-channel BGR
+            if proc_img.ndim == 2:
+                proc_img = cv2.cvtColor(proc_img, cv2.COLOR_GRAY2BGR)
+            elif proc_img.ndim == 3:
+                channels = proc_img.shape[2]
+                if channels == 4:
+                    proc_img = cv2.cvtColor(proc_img, cv2.COLOR_BGRA2BGR)
+                elif channels == 1:
+                    proc_img = cv2.cvtColor(proc_img, cv2.COLOR_GRAY2BGR)
+                elif channels != 3:
+                    return False
+            else:
+                return False
 
             if not proc_img.flags['C_CONTIGUOUS']:
                 proc_img = np.ascontiguousarray(proc_img)

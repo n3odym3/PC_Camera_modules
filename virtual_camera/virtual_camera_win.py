@@ -1,108 +1,90 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Tuple, Union
-import dearpygui.dearpygui as dpg
-from loguru import logger
-import numpy as np
+from typing import Any, Optional
 
-from core.input_output_types import IOTypes
-from core.window_base import WindowBase
+import dearpygui.dearpygui as dpg
+import numpy as np
+from loguru import logger
+
 from config.display_scaling import display_scaling
 from core.app_state import app_state
+from core.input_output_types import IOTypes
+from core.window_base import WindowBase
 from .virtual_camera import VirtualCameraEngine
 
 
 class Virtual_Camera_win(WindowBase):
     """
-    Window module for streaming image frames to a virtual camera device
+    Window module for streaming image frames to an OS-level virtual camera device
     (e.g., OBS Virtual Camera, Unity Capture, etc.).
+
+    Features:
+        - Multi-backend streaming (OBS, Unity Capture, v4l2loopback, Auto).
+        - Color/depth auto-conversion (Grayscale, BGR, BGRA, high bit-depth normalization).
+        - Dynamic resolution auto-fitting to incoming frame size.
+        - Transparent downstream frame passthrough for pipeline chaining.
+        - Real-time telemetry monitoring (device name, sent frames, live FPS).
+        - Remote automation control via dictionary commands (`IOTypes.CMD_DICT`).
     """
 
-    target_width: int
-    target_height: int
-    target_fps: int
-    backend: str
-    auto_fit_res: bool
+    label: str = "Virtual Camera"
+    win_width: int = display_scaling.scale(360)
+    win_height: int = display_scaling.scale(420)
+    description: str = (
+        "Stream image frames to an OS-level virtual camera device (OBS Virtual Camera, Unity Capture, etc.)."
+    )
 
-    start_btn_tag: str
-    backend_combo_tag: str
-    width_input_tag: str
-    height_input_tag: str
-    fps_input_tag: str
-    autofit_checkbox_tag: str
-    status_text_tag: str
-    device_text_tag: str
-    stats_text_tag: str
-    error_text_tag: str
+    accepted_input_types: list[str] = [IOTypes.FRAME, IOTypes.CMD_DICT]
+    outputs: dict[str, str] = {
+        "Color Frame (BGR)": IOTypes.FRAME,
+        "Status": IOTypes.STATUS_DICT,
+    }
+    persistent_fields: list[str] = [
+        "label",
+        "target_width",
+        "target_height",
+        "target_fps",
+        "backend",
+        "auto_fit_res",
+    ]
 
-    def __init__(
-        self,
-        label: str = "Virtual Camera",
-        win_width: int = display_scaling.scale(360),
-        win_height: int = display_scaling.scale(420),
-        pos: Tuple[int, int] = (100, 100),
-        uuid: Optional[str] = None,
-        outputs: Optional[Dict[str, Any]] = None,
-        visible: bool = True,
-        target_width: int = 1280,
-        target_height: int = 720,
-        target_fps: int = 30,
-        backend: str = "obs",
-        auto_fit_res: bool = True,
-        **kwargs: Any,
-    ) -> None:
-        super().__init__(
-            label=label,
-            pos=pos,
-            win_width=win_width,
-            win_height=win_height,
-            uuid=uuid,
-            outputs=outputs,
-            visible=visible,
-        )
+    def __init__(self, **kwargs: Any) -> None:
+        """
+        Initialize the Virtual Camera window module.
 
-        self._persistent_fields = [
-            "label",
-            "target_width",
-            "target_height",
-            "target_fps",
-            "backend",
-            "auto_fit_res",
-        ]
+        Args:
+            **kwargs: Additional keyword arguments forwarded to WindowBase.
+        """
+        super().__init__(**kwargs)
 
-        self.accepted_input_types = [IOTypes.FRAME, IOTypes.CMD_DICT]
-        self.outputs = {
-            "Color Frame (BGR)": IOTypes.FRAME,
-            "Status": IOTypes.STATUS_DICT,
-        }
-        self.connections = {k: [] for k in self.outputs}
+        uid = self.UUID
+        self.start_btn_tag: str = f"vcam_start_btn_{uid}"
+        self.backend_combo_tag: str = f"vcam_backend_{uid}"
+        self.width_input_tag: str = f"vcam_width_{uid}"
+        self.height_input_tag: str = f"vcam_height_{uid}"
+        self.fps_input_tag: str = f"vcam_fps_{uid}"
+        self.autofit_checkbox_tag: str = f"vcam_autofit_{uid}"
+        self.status_text_tag: str = f"vcam_status_{uid}"
+        self.device_text_tag: str = f"vcam_device_{uid}"
+        self.stats_text_tag: str = f"vcam_stats_{uid}"
+        self.error_text_tag: str = f"vcam_error_{uid}"
 
-        # Parameters
-        self.target_width = target_width
-        self.target_height = target_height
-        self.target_fps = target_fps
-        backend_str = str(backend).lower().strip()
+        self.target_width: int = int(getattr(self, "target_width", None) or 1280)
+        self.target_height: int = int(getattr(self, "target_height", None) or 720)
+        self.target_fps: int = int(getattr(self, "target_fps", None) or 30)
+
+        raw_backend = getattr(self, "backend", None)
+        backend_str = str(raw_backend if raw_backend is not None else "obs").lower().strip()
         if backend_str in ("unityvideo", "unity", "unity_capture"):
             backend_str = "unitycapture"
         elif backend_str in ("obs_virtualcam", "obsvirtualcam"):
             backend_str = "obs"
-        self.backend = backend_str
-        self.auto_fit_res = auto_fit_res
+        self.backend: str = backend_str
 
-        # Tags
-        self.start_btn_tag = f"vcam_start_btn_{self.UUID}"
-        self.backend_combo_tag = f"vcam_backend_{self.UUID}"
-        self.width_input_tag = f"vcam_width_{self.UUID}"
-        self.height_input_tag = f"vcam_height_{self.UUID}"
-        self.fps_input_tag = f"vcam_fps_{self.UUID}"
-        self.autofit_checkbox_tag = f"vcam_autofit_{self.UUID}"
-        self.status_text_tag = f"vcam_status_{self.UUID}"
-        self.device_text_tag = f"vcam_device_{self.UUID}"
-        self.stats_text_tag = f"vcam_stats_{self.UUID}"
-        self.error_text_tag = f"vcam_error_{self.UUID}"
+        raw_autofit = getattr(self, "auto_fit_res", None)
+        self.auto_fit_res: bool = True if raw_autofit is None else bool(raw_autofit)
 
-        # Engine
-        self.engine = VirtualCameraEngine(
+        self.engine: VirtualCameraEngine = VirtualCameraEngine(
             width=self.target_width,
             height=self.target_height,
             fps=self.target_fps,
@@ -114,21 +96,16 @@ class Virtual_Camera_win(WindowBase):
 
     def _build_ui(self) -> None:
         """Construct the DearPyGui interface."""
-        with dpg.window(
-            label=self.label,
-            width=self.win_width,
-            height=self.win_height,
-            pos=self.pos,
-            tag=self.winID,
-            show=self.visible,
-        ):
+        scale = display_scaling.scale
+
+        with self.window():
             # Start / Stop Control
             dpg.add_button(
                 tag=self.start_btn_tag,
                 label="Start Virtual Camera",
                 callback=self._on_toggle_camera,
                 width=-1,
-                height=display_scaling.scale(32),
+                height=scale(32),
             )
 
             dpg.add_separator()
@@ -149,7 +126,7 @@ class Virtual_Camera_win(WindowBase):
                     label="Backend",
                     items=backends,
                     default_value=self.backend,
-                    width=display_scaling.scale(180),
+                    width=scale(180),
                     callback=self._on_backend_change,
                 )
 
@@ -166,7 +143,7 @@ class Virtual_Camera_win(WindowBase):
                     default_value=self.target_width,
                     min_value=160,
                     max_value=3840,
-                    width=display_scaling.scale(160),
+                    width=scale(160),
                     callback=lambda s, v: setattr(self, "target_width", max(160, v)),
                 )
 
@@ -176,7 +153,7 @@ class Virtual_Camera_win(WindowBase):
                     default_value=self.target_height,
                     min_value=120,
                     max_value=2160,
-                    width=display_scaling.scale(160),
+                    width=scale(160),
                     callback=lambda s, v: setattr(self, "target_height", max(120, v)),
                 )
 
@@ -186,7 +163,7 @@ class Virtual_Camera_win(WindowBase):
                     default_value=self.target_fps,
                     min_value=1,
                     max_value=120,
-                    width=display_scaling.scale(160),
+                    width=scale(160),
                     callback=lambda s, v: setattr(self, "target_fps", max(1, v)),
                 )
 
@@ -201,17 +178,45 @@ class Virtual_Camera_win(WindowBase):
 
         self.autosize_window()
 
-    def _on_backend_change(self, sender: Any, value: str, *args: Any, **kwargs: Any) -> None:
+    def update_permission(self) -> None:
+        """Adapt module UI based on application permission mode."""
+        is_user_mode = getattr(app_state, "mode", "dev") == "user"
+
+        if dpg.does_item_exist(self.winID):
+            dpg.configure_item(self.winID, no_close=is_user_mode)
+        if dpg.does_item_exist(self.backend_combo_tag):
+            dpg.configure_item(self.backend_combo_tag, enabled=not is_user_mode)
+        if dpg.does_item_exist(self.width_input_tag):
+            dpg.configure_item(self.width_input_tag, readonly=is_user_mode)
+        if dpg.does_item_exist(self.height_input_tag):
+            dpg.configure_item(self.height_input_tag, readonly=is_user_mode)
+        if dpg.does_item_exist(self.fps_input_tag):
+            dpg.configure_item(self.fps_input_tag, readonly=is_user_mode)
+
+    def _on_backend_change(
+        self,
+        sender: Any = None,
+        app_data: Any = None,
+        user_data: Any = None,
+        *args: Any,
+        value: str = "",
+        **kwargs: Any,
+    ) -> None:
         """
         Handle virtual camera driver backend selection update.
 
         Args:
             sender: UI sender widget.
-            value: Backend identifier (e.g. 'obs', 'unitycapture', 'auto').
+            app_data: DPG app_data value.
+            user_data: DPG user data.
+            value: Backend identifier (optional kwarg).
         """
-        self.backend = value
-        if dpg.does_item_exist(self.backend_combo_tag) and dpg.get_value(self.backend_combo_tag) != value:
-            dpg.set_value(self.backend_combo_tag, value)
+        val = value if value else (app_data if isinstance(app_data, str) else "")
+        if not val:
+            return
+        self.backend = val
+        if dpg.does_item_exist(self.backend_combo_tag) and dpg.get_value(self.backend_combo_tag) != val:
+            dpg.set_value(self.backend_combo_tag, val)
         if self.engine.is_running:
             self._restart_camera()
 
@@ -291,7 +296,6 @@ class Virtual_Camera_win(WindowBase):
         if data is None:
             return
 
-        # Handle command dictionary
         if isinstance(data, dict) or kwargs.get("data_type") == IOTypes.CMD_DICT:
             cmd = data if isinstance(data, dict) else kwargs.get("data")
             if isinstance(cmd, dict):
@@ -303,7 +307,7 @@ class Virtual_Camera_win(WindowBase):
                 if "stop" in cmd and cmd["stop"]:
                     self._stop_camera()
                 if "backend" in cmd:
-                    self._on_backend_change(None, str(cmd["backend"]))
+                    self._on_backend_change(value=str(cmd["backend"]))
                 if "width" in cmd:
                     w = max(160, int(cmd["width"]))
                     self.target_width = w
@@ -329,7 +333,6 @@ class Virtual_Camera_win(WindowBase):
         if not isinstance(frame, np.ndarray):
             return
 
-        # Auto-fit resolution if requested and camera is not yet running, or dimension mismatch
         if self.auto_fit_res and not self.engine.is_running:
             h, w = frame.shape[:2]
             if w > 0 and h > 0 and (w != self.target_width or h != self.target_height):
@@ -340,18 +343,15 @@ class Virtual_Camera_win(WindowBase):
                 if dpg.does_item_exist(self.height_input_tag):
                     dpg.set_value(self.height_input_tag, h)
 
-        # If camera is running, send frame
         if self.engine.is_running:
             self.engine.send_frame(frame)
 
-            # Update UI statistics periodically
             if dpg.does_item_exist(self.stats_text_tag):
-                dpg.configure_item(
+                dpg.set_value(
                     self.stats_text_tag,
-                    default_value=f"Frames: {self.engine.frames_sent} | FPS: {self.engine.current_fps}",
+                    f"Frames: {self.engine.frames_sent} | FPS: {self.engine.current_fps}",
                 )
 
-        # Trigger downstream passthrough
         self.trigger_cb(frame=data)
 
     def trigger_cb(self, frame: Any) -> None:
@@ -361,30 +361,32 @@ class Virtual_Camera_win(WindowBase):
         Args:
             frame: Input frame tuple or numpy array.
         """
-        for output_key in self.outputs:
-            connected_modules = list(self.connections.get(output_key, []))
-            for module in connected_modules:
+        bgr_modules = self.connections.get("Color Frame (BGR)")
+        if bgr_modules:
+            for module in list(bgr_modules):
                 try:
                     if hasattr(module, "input_cb"):
-                        if output_key == "Color Frame (BGR)":
-                            module.input_cb(data=frame, data_type=IOTypes.FRAME)
-                        elif output_key == "Status":
-                            module.input_cb(
-                                data={
-                                    "is_running": self.engine.is_running,
-                                    "device": self.engine.device_name,
-                                    "fps": self.engine.current_fps,
-                                    "frames_sent": self.engine.frames_sent,
-                                },
-                                data_type=IOTypes.STATUS_DICT,
-                            )
+                        module.input_cb(data=frame, data_type=IOTypes.FRAME)
                 except Exception as e:
-                    logger.error(f"Virtual camera passthrough error on '{output_key}': {e}")
+                    logger.error(f"[{self.label}] Passthrough error on 'Color Frame (BGR)': {e}")
+
+        status_modules = self.connections.get("Status")
+        if status_modules:
+            status_data = {
+                "is_running": self.engine.is_running,
+                "device": self.engine.device_name,
+                "fps": self.engine.current_fps,
+                "frames_sent": self.engine.frames_sent,
+            }
+            for module in list(status_modules):
+                try:
+                    if hasattr(module, "input_cb"):
+                        module.input_cb(data=status_data, data_type=IOTypes.STATUS_DICT)
+                except Exception as e:
+                    logger.error(f"[{self.label}] Passthrough error on 'Status': {e}")
 
     def _send_status(self) -> None:
-        """
-        Broadcast current status dictionary to connected status listeners.
-        """
+        """Broadcast current status dictionary to connected status listeners."""
         status_data = {
             "is_running": self.engine.is_running,
             "device": self.engine.device_name,
@@ -397,37 +399,11 @@ class Virtual_Camera_win(WindowBase):
                 if hasattr(module, "input_cb"):
                     module.input_cb(data=status_data, data_type=IOTypes.STATUS_DICT)
             except Exception as e:
-                logger.error(f"Virtual camera status broadcast error: {e}")
-
-    def update_permission(self) -> None:
-        """
-        Adapt module UI based on application permission mode.
-        """
-        is_user_mode = getattr(app_state, "mode", "dev") == "user"
-
-        if dpg.does_item_exist(self.winID):
-            dpg.configure_item(self.winID, no_close=is_user_mode)
-        if dpg.does_item_exist(self.backend_combo_tag):
-            dpg.configure_item(self.backend_combo_tag, enabled=not is_user_mode)
-        if dpg.does_item_exist(self.width_input_tag):
-            dpg.configure_item(self.width_input_tag, readonly=is_user_mode)
-        if dpg.does_item_exist(self.height_input_tag):
-            dpg.configure_item(self.height_input_tag, readonly=is_user_mode)
-        if dpg.does_item_exist(self.fps_input_tag):
-            dpg.configure_item(self.fps_input_tag, readonly=is_user_mode)
+                logger.error(f"[{self.label}] Status broadcast error: {e}")
 
     def is_ready(self) -> bool:
         """
         Check if virtual camera module is ready.
-
-        Returns:
-            bool: Always True.
-        """
-        return True
-
-    def is_outputs_ready(self) -> bool:
-        """
-        Check if downstream connections are ready.
 
         Returns:
             bool: Always True.
@@ -441,10 +417,9 @@ class Virtual_Camera_win(WindowBase):
 
     def close(self) -> None:
         """Stop virtual camera engine, release drivers, and close window."""
-        self.engine.stop()
+        self.on_close()
         super().close()
 
 
 EXPORTED_CLASS = Virtual_Camera_win
 EXPORTED_NAME = "Virtual Camera"
-
