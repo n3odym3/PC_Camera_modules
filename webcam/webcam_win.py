@@ -1,18 +1,26 @@
 from __future__ import annotations
-from typing import Any, Dict, List, Tuple, Optional
+
 import threading
 import time
-import numpy as np
+from typing import Any, Optional
+
 import cv2
 import dearpygui.dearpygui as dpg
+import numpy as np
 from loguru import logger
 
-from core.window_base import WindowBase
-from core.input_output_types import IOTypes
 from config.display_scaling import display_scaling
-from core.config_manager import config
 from core.app_state import app_state
+from core.config_manager import config
+from core.input_output_types import IOTypes
+from core.window_base import WindowBase
 from .webcam import Webcam
+
+_ROTATION_MAP = {
+    90: cv2.ROTATE_90_CLOCKWISE,
+    180: cv2.ROTATE_180,
+    270: cv2.ROTATE_90_COUNTERCLOCKWISE,
+}
 
 
 class Webcam_win(WindowBase):
@@ -29,91 +37,54 @@ class Webcam_win(WindowBase):
         - Remote automation control via dictionary commands (`IOTypes.CMD_DICT`).
     """
 
-    description: str = "Control generic USB webcams. Supports resolution scanning, UVC controls, and live FPS monitoring."
+    label: str = "Webcam"
+    win_width: int = display_scaling.scale(320)
+    win_height: int = display_scaling.scale(460)
+    description: str = (
+        "Control generic USB webcams. Supports resolution scanning, UVC controls, and live FPS monitoring."
+    )
 
-    refresh_tag: str
-    camlist_tag: str
-    camstatus_tag: str
-    caminfo_tag: str
-    res_list_tag: str
-    mode_tag: str
-    trigger_btn_tag: str
-    start_btn_tag: str
-    stop_btn_tag: str
+    accepted_input_types: list[str] = [IOTypes.CMD_DICT]
+    outputs: dict[str, str] = {
+        "Color Frame (BGR)": IOTypes.FRAME,
+    }
+    persistent_fields: list[str] = ["label", "cam_name", "acquisition_mode"]
 
-    camlist: List[str]
-    cam_running: bool
-    cam_thread: Optional[threading.Thread]
-
-    acquisition_mode: str
-    trigger_requested: bool
-    _last_frame: Optional[np.ndarray]
-    _last_frame_lock: threading.Lock
-
-    webcam: Webcam
-
-    def __init__(
-        self,
-        label: str = "Webcam",
-        win_width: int = display_scaling.scale(320),
-        win_height: int = display_scaling.scale(460),
-        pos: Tuple[int, int] = (100, 100),
-        uuid: Optional[str] = None,
-        outputs: Optional[Dict[str, Any]] = None,
-        visible: bool = True,
-        **kwargs: Any,
-    ) -> None:
+    def __init__(self, **kwargs: Any) -> None:
         """
         Initialize the USB Webcam window module.
 
         Args:
-            label: Window title displayed in the UI.
-            win_width: Initial window width in pixels.
-            win_height: Initial window height in pixels.
-            pos: Initial (x, y) window position on screen.
-            uuid: Optional unique module identifier.
-            outputs: Optional predefined output connections dictionary.
-            visible: Whether the window is visible upon creation.
             **kwargs: Additional keyword arguments forwarded to WindowBase.
         """
-        super().__init__(
-            label=label,
-            pos=pos,
-            win_width=win_width,
-            win_height=win_height,
-            uuid=uuid,
-            outputs=outputs,
-            visible=visible,
-            **kwargs,
-        )
+        super().__init__(**kwargs)
 
-        self.refresh_tag = f"webcam_refresh_{self.UUID}"
-        self.camlist_tag = f"webcam_camlist_{self.UUID}"
-        self.camstatus_tag = f"webcam_status_{self.UUID}"
-        self.caminfo_tag = f"webcam_info_{self.UUID}"
-        self.res_list_tag = f"webcam_res_list_{self.UUID}"
-        self.mode_tag = f"webcam_mode_{self.UUID}"
-        self.trigger_btn_tag = f"webcam_trigger_{self.UUID}"
-        self.start_btn_tag = f"webcam_start_{self.UUID}"
-        self.stop_btn_tag = f"webcam_stop_{self.UUID}"
+        uid = self.UUID
+        self.refresh_tag: str = f"webcam_refresh_{uid}"
+        self.camlist_tag: str = f"webcam_camlist_{uid}"
+        self.camstatus_tag: str = f"webcam_status_{uid}"
+        self.caminfo_tag: str = f"webcam_info_{uid}"
+        self.res_list_tag: str = f"webcam_res_list_{uid}"
+        self.mode_tag: str = f"webcam_mode_{uid}"
+        self.trigger_btn_tag: str = f"webcam_trigger_{uid}"
+        self.start_btn_tag: str = f"webcam_start_{uid}"
+        self.stop_btn_tag: str = f"webcam_stop_{uid}"
 
-        self.camlist = []
-        self.cam_running = False
-        self.cam_thread = None
+        self.camlist: list[str] = []
+        self.cam_running: bool = False
+        self.cam_thread: Optional[threading.Thread] = None
 
-        self.acquisition_mode = "continuous"
-        self.trigger_requested = False
-        self._last_frame = None
-        self._last_frame_lock = threading.Lock()
+        self.cam_name: str = str(getattr(self, "cam_name", None) or "")
+        self.acquisition_mode: str = str(getattr(self, "acquisition_mode", None) or "continuous")
+        self.trigger_requested: bool = False
+        self._last_frame: Optional[np.ndarray] = None
+        self._last_frame_lock: threading.Lock = threading.Lock()
 
-        self.webcam = Webcam()
+        angle = config.get("Cameras", {}).get("Webcam", {}).get("rotation", 0)
+        self._rotation_code: Optional[int] = _ROTATION_MAP.get(angle)
+        self._source_name: str = f"Webcam_{self.cam_name}"
 
-        self._persistent_fields = ["label"]
-        self.accepted_input_types = [IOTypes.CMD_DICT]
-        self.outputs = {
-            "Color Frame (BGR)": IOTypes.FRAME,
-        }
-        self.connections = {k: [] for k in self.outputs}
+        self.webcam: Webcam = Webcam()
 
         self._build_ui()
         self.update_permission()
@@ -122,14 +93,9 @@ class Webcam_win(WindowBase):
         """
         Construct DearPyGui widgets for camera enumeration, streaming controls, and resolution selection.
         """
-        with dpg.window(
-            label=self.label,
-            width=self.win_width,
-            height=self.win_height,
-            pos=self.pos,
-            tag=self.winID,
-            show=self.visible,
-        ):
+        scale = display_scaling.scale
+
+        with self.window():
             with dpg.group(horizontal=True):
                 dpg.add_button(
                     label="Refresh", tag=self.refresh_tag, callback=self.refresh_cam
@@ -152,29 +118,29 @@ class Webcam_win(WindowBase):
                     label="Start",
                     tag=self.start_btn_tag,
                     callback=self.start_webcam_thread,
-                    width=display_scaling.scale(65),
+                    width=scale(65),
                     enabled=True,
                 )
                 dpg.add_button(
                     label="Stop",
                     tag=self.stop_btn_tag,
                     callback=self.stop_webcam_thread,
-                    width=display_scaling.scale(65),
+                    width=scale(65),
                     enabled=False,
                 )
                 dpg.add_text("Mode:")
                 dpg.add_combo(
                     items=["Continuous", "Trigger"],
-                    default_value="Continuous",
+                    default_value=self.acquisition_mode.capitalize(),
                     tag=self.mode_tag,
                     callback=self._on_mode_changed,
-                    width=display_scaling.scale(100),
+                    width=scale(100),
                 )
                 dpg.add_button(
                     label="Trigger",
                     tag=self.trigger_btn_tag,
                     callback=self._on_trigger,
-                    enabled=False,
+                    enabled=(self.acquisition_mode == "trigger"),
                     width=-1,
                 )
 
@@ -213,26 +179,47 @@ class Webcam_win(WindowBase):
         Query available video capture devices and update the combo dropdown list.
         """
         self.camlist = self.webcam.list_devices()
-        dpg.configure_item(self.camlist_tag, items=self.camlist)
-        if self.camlist and dpg.does_item_exist(self.camlist_tag):
-            if not dpg.get_value(self.camlist_tag):
+        if dpg.does_item_exist(self.camlist_tag):
+            dpg.configure_item(self.camlist_tag, items=self.camlist)
+            current_val = dpg.get_value(self.camlist_tag)
+            if self.cam_name and self.cam_name in self.camlist:
+                dpg.set_value(self.camlist_tag, self.cam_name)
+            elif not current_val and self.camlist:
                 dpg.set_value(self.camlist_tag, self.camlist[0])
 
-    def select_cam(self, sender: Any, cam_name: str, *args: Any, **kwargs: Any) -> None:
+    def select_cam(
+        self,
+        sender: Any = None,
+        app_data: Any = None,
+        user_data: Any = None,
+        *args: Any,
+        cam_name: str = "",
+        **kwargs: Any,
+    ) -> None:
         """
         Initialize the chosen camera and dynamically scan available resolutions and theoretical FPS.
 
         Args:
+            sender: DPG sender tag.
+            app_data: DPG app_data value.
+            user_data: DPG user data.
             cam_name: Name of the video grabber device.
         """
+        target = cam_name if cam_name else (app_data if isinstance(app_data, str) else "")
+        if not target:
+            return
+
+        self.cam_name = target
+        self._source_name = f"Webcam_{target}"
         self.stop_webcam_thread()
-        ret, info = self.webcam.init(cam_name)
+        ret, info = self.webcam.init(target)
         self.cam_running = ret
+        self._source_name = f"Webcam_{self.webcam.cam_name}"
 
         if ret:
-            # Query hardware-supported resolutions with theoretical frame rates
-            labels = self.webcam.get_resolution_labels(cam_name)
-            dpg.configure_item(self.res_list_tag, items=labels)
+            labels = self.webcam.get_resolution_labels(target)
+            if dpg.does_item_exist(self.res_list_tag):
+                dpg.configure_item(self.res_list_tag, items=labels)
 
             w, h, th_fps = (
                 (info[0], info[1], info[2])
@@ -240,13 +227,11 @@ class Webcam_win(WindowBase):
                 else (self.webcam.width, self.webcam.height, self.webcam.theoretical_fps)
             )
 
-            # Auto-select the preferred resolution (highest available in labels)
             active_label = labels[0] if labels else ""
-            if active_label:
+            if active_label and dpg.does_item_exist(self.res_list_tag):
                 dpg.set_value(self.res_list_tag, active_label)
-                # Apply preferred resolution to OpenCV capture if different from initial default
                 if not active_label.startswith(f"{w}x{h}"):
-                    self.change_resolution(None, active_label)
+                    self.change_resolution(res_str=active_label)
 
             w, h = self.webcam.width, self.webcam.height
             th_fps = self.webcam.theoretical_fps
@@ -261,15 +246,23 @@ class Webcam_win(WindowBase):
             if dpg.does_item_exist(self.camstatus_tag):
                 dpg.set_value(self.camstatus_tag, f"Status: Error ({info})")
 
-    def _on_mode_changed(self, sender: Any, app_data: Any, *args: Any, **kwargs: Any) -> None:
+    def _on_mode_changed(
+        self,
+        sender: Any = None,
+        app_data: Any = "Continuous",
+        user_data: Any = None,
+        *args: Any,
+        **kwargs: Any,
+    ) -> None:
         """
         Switch between Continuous streaming and software Trigger mode.
         """
-        if app_data == "Continuous":
+        mode_val = str(app_data).strip().capitalize()
+        if mode_val == "Continuous":
             self.acquisition_mode = "continuous"
             if dpg.does_item_exist(self.trigger_btn_tag):
                 dpg.configure_item(self.trigger_btn_tag, enabled=False)
-        else:
+        elif mode_val == "Trigger":
             self.acquisition_mode = "trigger"
             if dpg.does_item_exist(self.trigger_btn_tag):
                 dpg.configure_item(self.trigger_btn_tag, enabled=True)
@@ -301,13 +294,13 @@ class Webcam_win(WindowBase):
         Start the background frame grabber and FPS tracking worker thread.
         """
         if self.webcam.cap is None or not self.webcam.cap.isOpened():
-            target = dpg.get_value(self.camlist_tag) if dpg.does_item_exist(self.camlist_tag) else ""
+            target = dpg.get_value(self.camlist_tag) if dpg.does_item_exist(self.camlist_tag) else self.cam_name
             if not target and self.camlist:
                 target = self.camlist[0]
             if target:
-                self.select_cam(None, target)
+                self.select_cam(cam_name=target)
                 return
-            logger.warning("No webcam selected to start")
+            logger.warning(f"[{self.label}] No webcam selected to start")
             return
 
         if self.cam_thread and self.cam_thread.is_alive() and threading.current_thread() != self.cam_thread:
@@ -341,8 +334,7 @@ class Webcam_win(WindowBase):
                             w, h = self.webcam.width, self.webcam.height
                             dpg.set_value(self.caminfo_tag, f"Format: {w}x{h} | Th. {th:.0f} FPS | Live: {live_fps:.1f} FPS")
 
-                    with self._last_frame_lock:
-                        self._last_frame = frame
+                    self._last_frame = frame
 
                     if self.acquisition_mode == "continuous":
                         self.trigger_cb(frame)
@@ -371,37 +363,42 @@ class Webcam_win(WindowBase):
         Returns:
             np.ndarray: Rotated image array.
         """
-        angle = config.get("Cameras", {}).get("Webcam", {}).get("rotation", 0)
-        if angle == 90:
-            return cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
-        elif angle == 180:
-            return cv2.rotate(frame, cv2.ROTATE_180)
-        elif angle == 270:
-            return cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
+        if self._rotation_code is not None:
+            return cv2.rotate(frame, self._rotation_code)
         return frame
 
-    def change_resolution(self, sender: Any, res_str: str, *args: Any, **kwargs: Any) -> None:
+    def change_resolution(
+        self,
+        sender: Any = None,
+        app_data: Any = None,
+        user_data: Any = None,
+        *args: Any,
+        res_str: str = "",
+        **kwargs: Any,
+    ) -> None:
         """
         Change UVC stream resolution and requested framerate based on selection.
 
         Args:
+            sender: DPG sender tag.
+            app_data: DPG app_data value.
+            user_data: DPG user data.
             res_str: Formatted resolution label (e.g. "1920x1080 (max 60 FPS)").
         """
-        if not res_str:
+        target_str = res_str if res_str else (app_data if isinstance(app_data, str) else "")
+        if not target_str:
             return
 
         try:
-            # Parse resolution prefix e.g. "1920x1080 (max 60 FPS)" -> "1920x1080"
-            res_part = res_str.split()[0] if " " in res_str else res_str
+            res_part = target_str.split()[0] if " " in target_str else target_str
             if "x" in res_part:
                 w_str, h_str = res_part.split("x")
                 w, h = int(w_str), int(h_str)
 
-                # Extract requested FPS if mentioned
                 target_fps = None
-                if "max" in res_str:
+                if "max" in target_str:
                     try:
-                        fps_part = res_str.split("max")[1].strip().split()[0]
+                        fps_part = target_str.split("max")[1].strip().split()[0]
                         target_fps = float(fps_part)
                     except Exception:
                         pass
@@ -423,16 +420,16 @@ class Webcam_win(WindowBase):
             frame: Image array from webcam.
         """
         frame = self._apply_rotation(frame)
-        frame_tuple = (frame, f"Webcam_{self.webcam.cam_name}")
+        data = (frame, self._source_name)
         output_key = "Color Frame (BGR)"
 
         connected_modules = list(self.connections.get(output_key, []))
         for module in connected_modules:
             try:
                 if hasattr(module, "input_cb"):
-                    module.input_cb(data=frame_tuple, data_type=IOTypes.FRAME)
+                    module.input_cb(data=data, data_type=IOTypes.FRAME)
             except Exception as e:
-                logger.error(f"Webcam emit error: {e}")
+                logger.error(f"[{self.label}] Webcam emit error: {e}")
 
     def input_cb(self, data: Any = None, *args: Any, **kwargs: Any) -> None:
         """
@@ -460,32 +457,34 @@ class Webcam_win(WindowBase):
         else:
             cmd = None
 
-        if cmd and isinstance(cmd, dict):
-            if "start" in cmd and cmd["start"]:
-                self.start_webcam_thread()
+        if not cmd or not isinstance(cmd, dict):
+            return
 
-            if "stop" in cmd and cmd["stop"]:
-                self.stop_webcam_thread()
+        if cmd.get("start"):
+            self.start_webcam_thread()
 
-            if "mode" in cmd:
-                mode_str = str(cmd["mode"]).capitalize()
-                if mode_str in ("Continuous", "Trigger"):
-                    self._on_mode_changed(None, mode_str)
-                    if dpg.does_item_exist(self.mode_tag):
-                        dpg.set_value(self.mode_tag, mode_str)
+        if cmd.get("stop"):
+            self.stop_webcam_thread()
 
-            if "camera" in cmd or "select_cam" in cmd:
-                target_cam = str(cmd.get("camera") or cmd.get("select_cam"))
-                self.select_cam(None, target_cam)
+        if "mode" in cmd:
+            mode_str = str(cmd["mode"]).capitalize()
+            if mode_str in ("Continuous", "Trigger"):
+                self._on_mode_changed(app_data=mode_str)
+                if dpg.does_item_exist(self.mode_tag):
+                    dpg.set_value(self.mode_tag, mode_str)
 
-            if "resolution" in cmd:
-                self.change_resolution(None, str(cmd["resolution"]))
+        if "camera" in cmd or "select_cam" in cmd:
+            target_cam = str(cmd.get("camera") or cmd.get("select_cam"))
+            self.select_cam(cam_name=target_cam)
 
-            if "open_settings" in cmd and cmd["open_settings"]:
-                self._on_open_settings()
+        if "resolution" in cmd:
+            self.change_resolution(res_str=str(cmd["resolution"]))
 
-            if cmd.get("trigger_cam") or cmd.get("trigger"):
-                self._on_trigger()
+        if cmd.get("open_settings"):
+            self._on_open_settings()
+
+        if cmd.get("trigger_cam") or cmd.get("trigger"):
+            self._on_trigger()
 
     def is_ready(self) -> bool:
         """
@@ -496,33 +495,20 @@ class Webcam_win(WindowBase):
         """
         return True
 
-    def is_outputs_ready(self) -> bool:
-        """
-        Check if downstream modules connected to this window are ready.
-
-        Returns:
-            bool: Always True for the camera stream.
-        """
-        return True
-
     def on_close(self) -> None:
         """
         Cleanup logic executed before window closure.
         """
-        self.cam_running = False
-        if self.cam_thread and self.cam_thread.is_alive() and threading.current_thread() != self.cam_thread:
-            self.cam_thread.join(timeout=1.0)
-        self.webcam.close()
+        self.stop_webcam_thread()
+        if hasattr(self, "webcam") and self.webcam is not None:
+            self.webcam.close()
         super().on_close()
 
     def close(self) -> None:
         """
         Stop acquisition, release camera resources, and unregister module.
         """
-        self.cam_running = False
-        if self.cam_thread and self.cam_thread.is_alive() and threading.current_thread() != self.cam_thread:
-            self.cam_thread.join(timeout=1.0)
-        self.webcam.close()
+        self.on_close()
         super().close()
 
 
