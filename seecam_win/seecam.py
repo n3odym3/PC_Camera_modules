@@ -1,5 +1,6 @@
 from loguru import logger
 import numpy as np
+import threading
 import time
 import cv2 
 
@@ -51,6 +52,7 @@ class Seecam:
 		self.graph = None
 		self.last_frame = None
 		self.frame_ready = False
+		self._frame_event = threading.Event()
 		self.camera_filter = None
 		self.cam_ctrl = None
 		self.proc_amp = None
@@ -67,6 +69,10 @@ class Seecam:
 		self.fps = 0.0
 		self.active_format_index = 0
 		self.available_formats = []
+		self._cached_devices = []
+		self._exposure_limits = None
+		self._gain_limits = None
+		self._current_exposure = None
 
 		self.max_exposure_check = 4
 		self.exposure_check_count = 0
@@ -77,6 +83,7 @@ class Seecam:
 			temp_graph = FilterGraph()
 			devices = temp_graph.get_input_devices()
 			temp_graph.stop()
+			self._cached_devices = list(devices)
 			return devices
 		except Exception as e:
 			logger.warning(f"Error enumerating DirectShow devices: {e}")
@@ -101,19 +108,24 @@ class Seecam:
 		"""
 		self.close()
 
-		camlist = self.list_devices()
+		camlist = self._cached_devices if self._cached_devices else self.list_devices()
 		if isinstance(cam, str):
 			if cam in camlist:
 				cam_idx = camlist.index(cam)
 				cam_name = cam
 			else:
-				matched = [i for i, name in enumerate(camlist) if cam.lower() in name.lower()]
-				if matched:
-					cam_idx = matched[0]
-					cam_name = camlist[cam_idx]
+				camlist = self.list_devices()
+				if cam in camlist:
+					cam_idx = camlist.index(cam)
+					cam_name = cam
 				else:
-					logger.error(f"Device '{cam}' not found in {camlist}")
-					return False, None
+					matched = [i for i, name in enumerate(camlist) if cam.lower() in name.lower()]
+					if matched:
+						cam_idx = matched[0]
+						cam_name = camlist[cam_idx]
+					else:
+						logger.error(f"Device '{cam}' not found in {camlist}")
+						return False, None
 		else:
 			cam_idx = int(cam)
 			cam_name = camlist[cam_idx] if 0 <= cam_idx < len(camlist) else f"Device_{cam_idx}"
@@ -220,11 +232,9 @@ class Seecam:
 			self.cam_ctrl = self.camera_filter.QueryInterface(IAMCameraControlIID)
 			self.proc_amp = self.camera_filter.QueryInterface(IAMVideoProcAmpIID)
 
-			proc_params = self.list_video_proc_parameters()
-			if proc_params.get("Gain") is not None:
-				self.gain_prop_id = VideoProcAmp_Gain
-			else:
-				self.gain_prop_id = VideoProcAmp_Brightness
+			self._gain_limits = self._query_gain_limits()
+			self._exposure_limits = self._query_exposure_limits()
+			self._current_exposure = self.get_exposure()
 
 			self.defined = True
 			logger.success(f"Seecam {self.model_desc} initialized: {self.format} {self.width}x{self.height} @ ~{self.fps:.0f} FPS")
@@ -349,41 +359,47 @@ class Seecam:
 		"""
 		try:
 			buffer_np = np.ctypeslib.as_array(buffer, shape=(blen,))
+			fmt = self.format
+			w = self.width
+			h = self.height
 
-			if self.format == "Y8":
-				expected_bytes = self.width * self.height
+			if fmt == "Y8":
+				expected_bytes = w * h
 				if blen >= expected_bytes:
-					frame = buffer_np[:expected_bytes].view(dtype=np.uint8).reshape((self.height, self.width))
+					frame = buffer_np[:expected_bytes].view(dtype=np.uint8).reshape((h, w)).copy()
 				else:
 					return
 
-			elif self.format == "Y12":
+			elif fmt == "Y12":
 				# 12-bit packed: 2 pixels stored in 3 bytes
-				expected_bytes = (self.width * self.height * 3) // 2
+				expected_bytes = (w * h * 3) // 2
 				if blen >= expected_bytes:
 					triplets = buffer_np[:expected_bytes].reshape(-1, 3)
-					p1 = ((triplets[:, 0].astype(np.uint16) << 4) | (triplets[:, 2] & 0x0F))
-					p2 = ((triplets[:, 1].astype(np.uint16) << 4) | ((triplets[:, 2] >> 4) & 0x0F))
-
-					pixels = np.empty((self.width * self.height,), dtype=np.uint16)
-					pixels[0::2] = p1
-					pixels[1::2] = p2
-					frame = pixels.reshape((self.height, self.width))
+					pixels = np.empty((w * h,), dtype=np.uint16)
+					p1 = pixels[0::2]
+					p2 = pixels[1::2]
+					p1[:] = triplets[:, 0]
+					p1 <<= 4
+					p1 |= (triplets[:, 2] & 0x0F)
+					p2[:] = triplets[:, 1]
+					p2 <<= 4
+					p2 |= (triplets[:, 2] >> 4)
+					frame = pixels.reshape((h, w))
 				else:
 					return
 
-			elif self.format == "Y16":
-				expected_bytes = self.width * self.height * 2
+			elif fmt == "Y16":
+				expected_bytes = w * h * 2
 				if blen >= expected_bytes:
-					frame = buffer_np[:expected_bytes].view(dtype=np.uint16).reshape((self.height, self.width))
+					frame = buffer_np[:expected_bytes].view(dtype=np.uint16).reshape((h, w)).copy()
 				else:
 					return
 
-			elif self.format in ["UYVY", "YUY2"]:
-				expected_bytes = self.width * self.height * 2
+			elif fmt in ("UYVY", "YUY2"):
+				expected_bytes = w * h * 2
 				if blen >= expected_bytes:
-					raw = buffer_np[:expected_bytes].reshape((self.height, self.width, 2))
-					code = cv2.COLOR_YUV2BGR_UYVY if self.format == "UYVY" else cv2.COLOR_YUV2BGR_YUY2
+					raw = buffer_np[:expected_bytes].reshape((h, w, 2))
+					code = cv2.COLOR_YUV2BGR_UYVY if fmt == "UYVY" else cv2.COLOR_YUV2BGR_YUY2
 					bgr = cv2.cvtColor(raw, code)
 					frame = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
 				else:
@@ -394,6 +410,7 @@ class Seecam:
 			if frame is not None:
 				self.last_frame = frame
 				self.frame_ready = True
+				self._frame_event.set()
 
 		except Exception:
 			pass
@@ -402,13 +419,12 @@ class Seecam:
 		"""Reads the latest grabbed frame."""
 		frame = None
 		self.frame_ready = False
+		self._frame_event.clear()
 		if self.defined and self.graph:
 			try:
 				if self.graph.grab_frame():
 					if not instant:
-						timeout = time.time() + 0.5
-						while not self.frame_ready and time.time() < timeout:
-							time.sleep(0.001)
+						self._frame_event.wait(timeout=0.5)
 					frame = self.last_frame
 				return True, frame
 			except Exception:
@@ -427,36 +443,39 @@ class Seecam:
 		if frame is None:
 			return None
 
+		if frame.dtype == np.uint8 and depth_mode != "Normalize":
+			return frame
+
+		shift = 0
 		if depth_mode == "Auto":
-			if self.format == "Y8" or frame.dtype == np.uint8:
+			if self.format == "Y8":
 				return frame
 			elif self.format == "Y12":
-				return (frame >> 4).astype(np.uint8)
+				shift = 4
 			elif self.format == "Y16":
 				if self.model == "CU20G":
-					return (frame >> 2).astype(np.uint8)
+					shift = 2
 				else:
 					sample = frame[::8, ::8] if frame.shape[0] >= 8 else frame
-					if np.max(sample) < 1024:
-						return (frame >> 2).astype(np.uint8)
-					return (frame >> 8).astype(np.uint8)
+					shift = 2 if int(np.max(sample)) < 1024 else 8
 			else:
-				if frame.dtype == np.uint8:
-					return frame
-				return (frame >> 8).astype(np.uint8)
-
+				shift = 8
 		elif depth_mode == "Normalize":
-			return cv2.normalize(frame, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+			return cv2.normalize(frame, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U)
 		elif depth_mode == "8-bit":
 			return frame.astype(np.uint8)
 		elif depth_mode == "10-bit":
-			return (frame >> 2).astype(np.uint8)
+			shift = 2
 		elif depth_mode == "12-bit":
-			return (frame >> 4).astype(np.uint8)
+			shift = 4
 		elif depth_mode == "16-bit":
-			return (frame >> 8).astype(np.uint8)
+			shift = 8
+		else:
+			return frame.astype(np.uint8)
 
-		return frame.astype(np.uint8)
+		if shift == 8 and frame.dtype == np.uint16 and frame.flags["C_CONTIGUOUS"]:
+			return np.ascontiguousarray(frame.view(np.uint8)[:, 1::2])
+		return (frame >> shift).astype(np.uint8)
 
 	def convert_to_BGR(self, frame: np.ndarray) -> np.ndarray:
 		"""Converts 8-bit grayscale frame to 3-channel BGR."""
@@ -472,34 +491,38 @@ class Seecam:
 			return 0.0
 		return float(np.max(frame))
 
-	def auto_expos(self, frame, target_exposure=220, threshold=20, min_exposure=-13, max_exposure=0):
+	def auto_expos(self, frame, target_exposure=220, threshold=20, min_exposure=-13, max_exposure=0, frame_exposure=None):
 		"""Simple auto-exposure feedback loop."""
-		frame_exposure = self.calc_exposure(frame)
-		current_exposure = self.get_exposure()
-		if current_exposure is None:
-			return 0
+		if frame_exposure is None:
+			frame_exposure = self.calc_exposure(frame)
 
-		limits = self.get_exposure_limits()
-		if limits:
+		limits = self._exposure_limits
+		if limits is not None:
 			min_exposure, max_exposure = limits[0], limits[1]
 
 		if frame_exposure < target_exposure - threshold:
 			if self.exposure_check_count > self.max_exposure_check:
+				current_exposure = self._current_exposure if self._current_exposure is not None else self.get_exposure()
+				if current_exposure is None:
+					return 0
 				if current_exposure < max_exposure:
 					self.set_exposure(current_exposure + 1)
-					self.exposure_check_count = 0
+				self.exposure_check_count = 0
 			else:
 				self.exposure_check_count += 1
 
 		elif frame_exposure > target_exposure + threshold:
 			if self.exposure_check_count > self.max_exposure_check:
+				current_exposure = self._current_exposure if self._current_exposure is not None else self.get_exposure()
+				if current_exposure is None:
+					return 0
 				if current_exposure > min_exposure:
 					self.set_exposure(current_exposure - 1)
-					self.exposure_check_count = 0
+				self.exposure_check_count = 0
 			else:
 				self.exposure_check_count += 1
 
-		return self.get_exposure()
+		return self._current_exposure if self._current_exposure is not None else self.get_exposure()
 
 	def list_camera_parameters(self):
 		if not self.cam_ctrl:
@@ -547,20 +570,47 @@ class Seecam:
 
 		return result
 
-	def get_exposure_limits(self):
-		cam_params = self.list_camera_parameters()
-		if cam_params.get("Exposure") is not None:
-			return cam_params["Exposure"]["min"], cam_params["Exposure"]["max"], cam_params["Exposure"].get("step", 1)
+	def _query_exposure_limits(self):
+		if not self.cam_ctrl:
+			return None
+		min_val = c_long()
+		max_val = c_long()
+		step_val = c_long()
+		default_val = c_long()
+		caps_flags = c_long()
+		try:
+			hr = self.cam_ctrl.GetRange(
+				CameraControl_Exposure,
+				byref(min_val),
+				byref(max_val),
+				byref(step_val),
+				byref(default_val),
+				byref(caps_flags),
+			)
+			if hr == 0:
+				return min_val.value, max_val.value, step_val.value
+		except COMError:
+			pass
 		return None
+
+	def get_exposure_limits(self):
+		if self._exposure_limits is not None:
+			return self._exposure_limits
+		self._exposure_limits = self._query_exposure_limits()
+		return self._exposure_limits
 
 	def set_exposure(self, exposure_value: int, manual: bool = True) -> bool:
 		if not self.cam_ctrl:
 			return False
 
+		val = int(exposure_value)
 		flags = CameraControl_Flags_Manual if manual else CameraControl_Flags_Auto
 		try:
-			hr = self.cam_ctrl.Set(CameraControl_Exposure, int(exposure_value), flags)
-			return hr == 0
+			hr = self.cam_ctrl.Set(CameraControl_Exposure, val, flags)
+			if hr == 0:
+				self._current_exposure = val
+				return True
+			return False
 		except COMError:
 			return False
 
@@ -572,6 +622,7 @@ class Seecam:
 		try:
 			hr = self.cam_ctrl.Get(CameraControl_Exposure, byref(value), byref(flags))
 			if hr == 0:
+				self._current_exposure = value.value
 				return value.value
 		except COMError:
 			return None
@@ -626,15 +677,36 @@ class Seecam:
 
 		return result
 
-	def get_gain_limits(self):
-		proc_params = self.list_video_proc_parameters()
-		if proc_params.get("Gain") is not None:
-			self.gain_prop_id = VideoProcAmp_Gain
-			return proc_params["Gain"]["min"], proc_params["Gain"]["max"], proc_params["Gain"].get("step", 1)
-		elif proc_params.get("Brightness") is not None:
-			self.gain_prop_id = VideoProcAmp_Brightness
-			return proc_params["Brightness"]["min"], proc_params["Brightness"]["max"], proc_params["Brightness"].get("step", 1)
+	def _query_gain_limits(self):
+		if not self.proc_amp:
+			return None
+		for prop_id in (VideoProcAmp_Gain, VideoProcAmp_Brightness):
+			min_val = c_long()
+			max_val = c_long()
+			step_val = c_long()
+			default_val = c_long()
+			caps_val = c_long()
+			try:
+				hr = self.proc_amp.GetRange(
+					prop_id,
+					byref(min_val),
+					byref(max_val),
+					byref(step_val),
+					byref(default_val),
+					byref(caps_val),
+				)
+				if hr == 0:
+					self.gain_prop_id = prop_id
+					return min_val.value, max_val.value, step_val.value
+			except COMError:
+				pass
 		return None
+
+	def get_gain_limits(self):
+		if self._gain_limits is not None:
+			return self._gain_limits
+		self._gain_limits = self._query_gain_limits()
+		return self._gain_limits
 
 	def set_gain(self, gain_value: int) -> bool:
 		if not self.proc_amp:
@@ -663,11 +735,15 @@ class Seecam:
 		"""Stops the DirectShow graph, disconnects pins, removes filters, and releases COM objects."""
 		self.defined = False
 		self.frame_ready = False
+		self._frame_event.set()
 		self.last_frame = None
 
 		self.cam_ctrl = None
 		self.proc_amp = None
 		self.camera_filter = None
+		self._exposure_limits = None
+		self._gain_limits = None
+		self._current_exposure = None
 
 		if self.graph is not None:
 			try:

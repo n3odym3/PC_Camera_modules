@@ -1,18 +1,26 @@
 from __future__ import annotations
-from typing import Any, Dict, List, Tuple, Optional
+
 import threading
 import time
-import numpy as np
+from typing import Any, Optional
+
 import cv2
 import dearpygui.dearpygui as dpg
+import numpy as np
 from loguru import logger
 
-from core.window_base import WindowBase
-from core.input_output_types import IOTypes
 from config.display_scaling import display_scaling
-from core.config_manager import config
 from core.app_state import app_state
+from core.config_manager import config
+from core.input_output_types import IOTypes
+from core.window_base import WindowBase
 from .seecam import Seecam
+
+_ROTATION_MAP = {
+    90: cv2.ROTATE_90_CLOCKWISE,
+    180: cv2.ROTATE_180,
+    270: cv2.ROTATE_90_COUNTERCLOCKWISE,
+}
 
 
 class Seecam_win(WindowBase):
@@ -29,110 +37,64 @@ class Seecam_win(WindowBase):
         - Remote automation control via dictionary commands (`IOTypes.CMD_DICT`).
     """
 
-    description: str = "Control e-con Systems See3CAM cameras. Supports Y8/Y12/Y16 formats, dual 8-bit/16-bit output, and UVC controls."
+    label: str = "Seecam"
+    win_width: int = display_scaling.scale(340)
+    win_height: int = display_scaling.scale(490)
+    description: str = (
+        "Control e-con Systems See3CAM cameras. Supports Y8/Y12/Y16 formats, dual 8-bit/16-bit output, and UVC controls."
+    )
 
-    refresh_tag: str
-    camlist_tag: str
-    camstatus_tag: str
-    cammodel_tag: str
-    caminfo_tag: str
-    start_btn_tag: str
-    stop_btn_tag: str
-    mode_radio_tag: str
-    trigger_btn_tag: str
-    webcam_gain_tag: str
-    webcam_exposure_tag: str
-    frame_avg_tag: str
-    auto_exposure_tag: str
-    res_list_tag: str
+    accepted_input_types: list[str] = [IOTypes.CMD_DICT]
+    outputs: dict[str, str] = {
+        "8bit RGB": IOTypes.FRAME,
+        "16bit gray": IOTypes.FRAME16,
+    }
+    persistent_fields: list[str] = ["label", "cam_name", "acquisition_mode", "depth_mode"]
 
-    camlist: List[str]
-    cam_running: bool
-    cam_thread: Optional[threading.Thread]
-
-    cam_name: str
-    acquisition_mode: str
-    trigger_requested: bool
-    depth_mode: str
-
-    _last_frame_lock: threading.Lock
-    _last_raw_frame: Optional[np.ndarray]
-    _last_bgr_frame: Optional[np.ndarray]
-
-    seecam: Seecam
-
-    def __init__(
-        self,
-        label: str = "Seecam",
-        win_width: int = display_scaling.scale(340),
-        win_height: int = display_scaling.scale(490),
-        pos: Tuple[int, int] = (10, 10),
-        uuid: Optional[str] = None,
-        outputs: Optional[Dict[str, Any]] = None,
-        visible: bool = True,
-        **kwargs: Any,
-    ) -> None:
+    def __init__(self, **kwargs: Any) -> None:
         """
         Initialize the See3CAM Camera window module.
 
         Args:
-            label: Window title displayed in the UI.
-            win_width: Initial window width in pixels.
-            win_height: Initial window height in pixels.
-            pos: Initial (x, y) window position on screen.
-            uuid: Optional unique module identifier.
-            outputs: Optional predefined output connections dictionary.
-            visible: Whether the window is visible upon creation.
             **kwargs: Additional keyword arguments forwarded to WindowBase.
         """
-        super().__init__(
-            label=label,
-            pos=pos,
-            win_width=win_width,
-            win_height=win_height,
-            uuid=uuid,
-            outputs=outputs,
-            visible=visible,
-            **kwargs,
-        )
+        super().__init__(**kwargs)
 
-        self.refresh_tag = f"seecam_refresh_{self.UUID}"
-        self.camlist_tag = f"seecam_camlist_{self.UUID}"
-        self.camstatus_tag = f"seecam_status_{self.UUID}"
-        self.cammodel_tag = f"seecam_model_{self.UUID}"
-        self.caminfo_tag = f"seecam_info_{self.UUID}"
-        self.start_btn_tag = f"seecam_start_{self.UUID}"
-        self.stop_btn_tag = f"seecam_stop_{self.UUID}"
-        self.mode_radio_tag = f"seecam_mode_radio_{self.UUID}"
-        self.trigger_btn_tag = f"seecam_trigger_btn_{self.UUID}"
-        self.webcam_gain_tag = f"seecam_gain_{self.UUID}"
-        self.webcam_exposure_tag = f"seecam_exposure_{self.UUID}"
-        self.frame_avg_tag = f"seecam_frame_avg_{self.UUID}"
-        self.auto_exposure_tag = f"seecam_auto_exposure_{self.UUID}"
-        self.res_list_tag = f"seecam_res_list_{self.UUID}"
+        uid = self.UUID
+        self.refresh_tag: str = f"seecam_refresh_{uid}"
+        self.camlist_tag: str = f"seecam_camlist_{uid}"
+        self.camstatus_tag: str = f"seecam_status_{uid}"
+        self.cammodel_tag: str = f"seecam_model_{uid}"
+        self.caminfo_tag: str = f"seecam_info_{uid}"
+        self.start_btn_tag: str = f"seecam_start_{uid}"
+        self.stop_btn_tag: str = f"seecam_stop_{uid}"
+        self.mode_radio_tag: str = f"seecam_mode_radio_{uid}"
+        self.trigger_btn_tag: str = f"seecam_trigger_btn_{uid}"
+        self.webcam_gain_tag: str = f"seecam_gain_{uid}"
+        self.webcam_exposure_tag: str = f"seecam_exposure_{uid}"
+        self.frame_avg_tag: str = f"seecam_frame_avg_{uid}"
+        self.auto_exposure_tag: str = f"seecam_auto_exposure_{uid}"
+        self.res_list_tag: str = f"seecam_res_list_{uid}"
 
-        self.camlist = []
-        self.cam_running = False
-        self.cam_thread = None
+        self.camlist: list[str] = []
+        self.cam_running: bool = False
+        self.cam_thread: Optional[threading.Thread] = None
 
-        self.cam_name = ""
-        self.acquisition_mode = "continuous"
-        self.trigger_requested = False
-        self.depth_mode = "Auto"
+        self.cam_name: str = str(getattr(self, "cam_name", None) or "")
+        self.acquisition_mode: str = str(getattr(self, "acquisition_mode", None) or "continuous")
+        self.trigger_requested: bool = False
+        self.depth_mode: str = str(getattr(self, "depth_mode", None) or "Auto")
+        self.auto_exposure_enabled: bool = False
 
-        self._last_frame_lock = threading.Lock()
-        self._last_raw_frame = None
-        self._last_bgr_frame = None
+        angle = config.get("Cameras", {}).get("Seecam", {}).get("rotation", 0)
+        self._rotation_code: Optional[int] = _ROTATION_MAP.get(angle)
 
-        self.seecam = Seecam()
+        self._last_frame_lock: threading.Lock = threading.Lock()
+        self._last_raw_frame: Optional[np.ndarray] = None
+        self._last_8bit_frame: Optional[np.ndarray] = None
+        self._last_bgr_frame: Optional[np.ndarray] = None
 
-        self._persistent_fields = ["label"]
-        self.accepted_input_types = [IOTypes.CMD_DICT]
-        self.outputs = {
-            "8bit RGB": IOTypes.FRAME,
-            "16bit gray": IOTypes.FRAME16,
-        }
-        self.connections = {k: [] for k in self.outputs}
+        self.seecam: Seecam = Seecam()
 
         self._build_ui()
         self.update_permission()
@@ -141,14 +103,8 @@ class Seecam_win(WindowBase):
         """
         Construct DearPyGui widgets for device selection, stream controls, and hardware sliders.
         """
-        with dpg.window(
-            label=self.label,
-            width=self.win_width,
-            height=self.win_height,
-            pos=self.pos,
-            tag=self.winID,
-            show=self.visible,
-        ):
+        scale = display_scaling.scale
+        with self.window():
             # Device selection
             with dpg.group(horizontal=True):
                 dpg.add_button(label="Refresh", tag=self.refresh_tag, callback=self.refresh_cam)
@@ -167,29 +123,29 @@ class Seecam_win(WindowBase):
                     label="Start",
                     tag=self.start_btn_tag,
                     callback=self.start_cam_thread,
-                    width=display_scaling.scale(65),
+                    width=scale(65),
                     enabled=True,
                 )
                 dpg.add_button(
                     label="Stop",
                     tag=self.stop_btn_tag,
                     callback=self.stop_cam_thread,
-                    width=display_scaling.scale(65),
+                    width=scale(65),
                     enabled=False,
                 )
                 dpg.add_text("Mode:")
                 dpg.add_combo(
                     items=["Continuous", "Trigger"],
-                    default_value="Continuous",
+                    default_value=self.acquisition_mode.capitalize(),
                     tag=self.mode_radio_tag,
                     callback=self._on_mode_changed,
-                    width=display_scaling.scale(100),
+                    width=scale(100),
                 )
                 dpg.add_button(
                     label="Trigger",
                     tag=self.trigger_btn_tag,
                     callback=self._on_trigger,
-                    enabled=False,
+                    enabled=(self.acquisition_mode == "trigger"),
                     width=-1,
                 )
 
@@ -221,8 +177,12 @@ class Seecam_win(WindowBase):
 
             with dpg.group(horizontal=True):
                 dpg.add_text("Auto exp:")
-                dpg.add_checkbox(default_value=False, tag=self.auto_exposure_tag)
-                dpg.add_spacer(width=display_scaling.scale(15))
+                dpg.add_checkbox(
+                    default_value=False,
+                    tag=self.auto_exposure_tag,
+                    callback=lambda s, v: setattr(self, "auto_exposure_enabled", bool(v)),
+                )
+                dpg.add_spacer(width=scale(15))
                 dpg.add_text("Frame max: 0", tag=self.frame_avg_tag)
 
             dpg.add_separator()
@@ -247,23 +207,33 @@ class Seecam_win(WindowBase):
         if dpg.does_item_exist(self.winID):
             dpg.configure_item(self.winID, no_close=is_user)
 
-    def refresh_cam(self, *args: Any, **kwargs: Any) -> None:
+    def refresh_cam(
+        self,
+        sender: Any = None,
+        app_data: Any = None,
+        user_data: Any = None,
+        *args: Any,
+        **kwargs: Any,
+    ) -> None:
         """
         Query connected DirectShow video capture devices and update the camera dropdown list.
         """
         self.camlist = self.seecam.list_devices()
         sorted_camlist = sorted(self.camlist, key=lambda c: (0 if "see3" in c.lower() else 1, c))
-        dpg.configure_item(self.camlist_tag, items=sorted_camlist)
-        if sorted_camlist and dpg.does_item_exist(self.camlist_tag):
+        if dpg.does_item_exist(self.camlist_tag):
+            dpg.configure_item(self.camlist_tag, items=sorted_camlist)
             current_val = dpg.get_value(self.camlist_tag)
-            if not current_val:
-                target = None
-                for c in sorted_camlist:
-                    if "see3" in c.lower():
-                        target = c
-                        break
-                if not target:
-                    target = sorted_camlist[0]
+
+            if self.cam_name and self.cam_name in sorted_camlist:
+                target = self.cam_name
+            elif current_val and current_val in sorted_camlist:
+                target = current_val
+            elif sorted_camlist:
+                target = next((c for c in sorted_camlist if "see3" in c.lower()), sorted_camlist[0])
+            else:
+                target = ""
+
+            if target:
                 dpg.set_value(self.camlist_tag, target)
                 self.cam_name = target
 
@@ -272,31 +242,38 @@ class Seecam_win(WindowBase):
         Automatically select and initialize the first available See3CAM device found.
         """
         self.refresh_cam()
-        target = None
-        for camname in self.camlist:
-            if "see3" in camname.lower():
-                target = camname
-                break
-        if not target and self.camlist:
-            target = self.camlist[0]
-
-        if target:
+        if not self.camlist:
+            return
+        target = next((c for c in self.camlist if "see3" in c.lower()), self.camlist[0])
+        if dpg.does_item_exist(self.camlist_tag):
             dpg.set_value(self.camlist_tag, target)
-            self.select_cam(None, target)
+        self.select_cam(cam_name=target)
 
-    def select_cam(self, sender: Any, cam_name: str, *args: Any, **kwargs: Any) -> None:
+    def select_cam(
+        self,
+        sender: Any = None,
+        app_data: Any = None,
+        user_data: Any = None,
+        *args: Any,
+        cam_name: str = "",
+        **kwargs: Any,
+    ) -> None:
         """
         Initialize the selected camera, update slider limits, and start frame acquisition.
 
         Args:
+            sender: DPG sender tag (if called as callback).
+            app_data: DPG app_data value.
+            user_data: DPG user data (if applicable).
             cam_name: Name of the DirectShow capture device.
         """
-        if not cam_name:
+        target = cam_name if cam_name else (app_data if isinstance(app_data, str) else "")
+        if not target:
             return
 
-        self.cam_name = cam_name
+        self.cam_name = target
         self.stop_cam_thread()
-        ret, info = self.seecam.init(cam_name)
+        ret, info = self.seecam.init(target)
         self.cam_running = ret
 
         if ret and isinstance(info, tuple):
@@ -309,25 +286,24 @@ class Seecam_win(WindowBase):
             if dpg.does_item_exist(self.caminfo_tag):
                 dpg.set_value(self.caminfo_tag, f"Format: {fmt} {w}x{h} | Th. {th_fps:.0f} FPS")
 
-            # Update stream capabilities dropdown directly
             self._update_resolution_dropdown()
 
-            # Configure Gain Slider limits
             gain_limits = self.seecam.get_gain_limits()
             if gain_limits:
                 min_g, max_g = gain_limits[0], gain_limits[1]
-                dpg.configure_item(self.webcam_gain_tag, min_value=min_g, max_value=max_g)
+                if dpg.does_item_exist(self.webcam_gain_tag):
+                    dpg.configure_item(self.webcam_gain_tag, min_value=min_g, max_value=max_g)
                 cur_g = self.seecam.get_gain()
-                if cur_g is not None:
+                if cur_g is not None and dpg.does_item_exist(self.webcam_gain_tag):
                     dpg.set_value(self.webcam_gain_tag, cur_g)
 
-            # Configure Exposure Slider limits
             exp_limits = self.seecam.get_exposure_limits()
             if exp_limits:
                 min_e, max_e = exp_limits[0], exp_limits[1]
-                dpg.configure_item(self.webcam_exposure_tag, min_value=min_e, max_value=max_e)
+                if dpg.does_item_exist(self.webcam_exposure_tag):
+                    dpg.configure_item(self.webcam_exposure_tag, min_value=min_e, max_value=max_e)
                 cur_e = self.seecam.get_exposure()
-                if cur_e is not None:
+                if cur_e is not None and dpg.does_item_exist(self.webcam_exposure_tag):
                     dpg.set_value(self.webcam_exposure_tag, cur_e)
 
             self.start_cam_thread()
@@ -341,36 +317,40 @@ class Seecam_win(WindowBase):
         """
         formats = self.seecam.available_formats
         labels = [f["label"] for f in formats]
-        dpg.configure_item(self.res_list_tag, items=labels)
+        if dpg.does_item_exist(self.res_list_tag):
+            dpg.configure_item(self.res_list_tag, items=labels)
 
-        active_label = ""
-        cur_idx = self.seecam.active_format_index
-        for f in formats:
-            if f["index"] == cur_idx:
-                active_label = f["label"]
-                break
-        if not active_label and labels:
-            active_label = labels[0]
+            cur_idx = self.seecam.active_format_index
+            active_label = next((f["label"] for f in formats if f.get("index") == cur_idx), "")
+            if not active_label and labels:
+                active_label = labels[0]
 
-        if active_label:
-            dpg.set_value(self.res_list_tag, active_label)
+            if active_label:
+                dpg.set_value(self.res_list_tag, active_label)
 
-    def change_resolution(self, sender: Any, res_label: str, *args: Any, **kwargs: Any) -> None:
+    def change_resolution(
+        self,
+        sender: Any = None,
+        app_data: Any = None,
+        user_data: Any = None,
+        *args: Any,
+        res_label: str = "",
+        **kwargs: Any,
+    ) -> None:
         """
         Change the camera format and resolution dynamically.
 
         Args:
+            sender: DPG sender tag (if called as callback).
+            app_data: DPG app_data value.
+            user_data: DPG user data (if applicable).
             res_label: Format and resolution string matching an available format item.
         """
-        if not res_label:
+        target_label = res_label if res_label else (app_data if isinstance(app_data, str) else "")
+        if not target_label:
             return
 
-        target_fmt = None
-        for f in self.seecam.available_formats:
-            if f["label"] == res_label:
-                target_fmt = f
-                break
-
+        target_fmt = next((f for f in self.seecam.available_formats if f.get("label") == target_label), None)
         if not target_fmt:
             return
 
@@ -378,9 +358,8 @@ class Seecam_win(WindowBase):
         if format_index == self.seecam.active_format_index and self.cam_running:
             return
 
-        logger.info(f"Switching Seecam format to index {format_index}: {res_label}")
+        logger.info(f"[{self.label}] Switching Seecam format to index {format_index}: {target_label}")
 
-        # Stop running acquisition thread during graph rebuild
         self.stop_cam_thread()
 
         ret, info = self.seecam.init(self.cam_name, format_index=format_index)
@@ -392,49 +371,79 @@ class Seecam_win(WindowBase):
                 dpg.set_value(self.caminfo_tag, f"Format: {fmt} {w}x{h} | Th. {th_fps:.0f} FPS")
 
             gain_limits = self.seecam.get_gain_limits()
-            if gain_limits:
+            if gain_limits and dpg.does_item_exist(self.webcam_gain_tag):
                 dpg.configure_item(self.webcam_gain_tag, min_value=gain_limits[0], max_value=gain_limits[1])
             exp_limits = self.seecam.get_exposure_limits()
-            if exp_limits:
+            if exp_limits and dpg.does_item_exist(self.webcam_exposure_tag):
                 dpg.configure_item(self.webcam_exposure_tag, min_value=exp_limits[0], max_value=exp_limits[1])
 
             self.start_cam_thread()
         else:
-            logger.error(f"Failed to switch to format {res_label}")
+            logger.error(f"[{self.label}] Failed to switch to format {target_label}")
 
-    def set_gain(self, sender: Any, app_data: int, user_data: Any = None, *args: Any) -> None:
-        """
-        Set camera hardware gain value.
-        """
-        self.seecam.set_gain(app_data)
+    def set_gain(
+        self,
+        sender: Any = None,
+        app_data: Any = None,
+        user_data: Any = None,
+        *args: Any,
+        **kwargs: Any,
+    ) -> None:
+        """Set camera hardware gain value."""
+        if app_data is not None:
+            self.seecam.set_gain(int(app_data))
 
-    def set_exposure(self, sender: Any, app_data: int, user_data: Any = None, *args: Any) -> None:
-        """
-        Set camera hardware exposure value.
-        """
-        self.seecam.set_exposure(app_data)
+    def set_exposure(
+        self,
+        sender: Any = None,
+        app_data: Any = None,
+        user_data: Any = None,
+        *args: Any,
+        **kwargs: Any,
+    ) -> None:
+        """Set camera hardware exposure value."""
+        if app_data is not None:
+            self.seecam.set_exposure(int(app_data))
 
-    def _on_mode_changed(self, sender: Any, app_data: str, user_data: Any = None, *args: Any) -> None:
-        """
-        Switch between Continuous streaming and software Trigger mode.
-        """
-        if app_data == "Continuous":
+    def _on_mode_changed(
+        self,
+        sender: Any = None,
+        app_data: Any = "Continuous",
+        user_data: Any = None,
+        *args: Any,
+        **kwargs: Any,
+    ) -> None:
+        """Switch between Continuous streaming and software Trigger mode."""
+        mode_val = str(app_data).strip().capitalize()
+        if mode_val == "Continuous":
             self.acquisition_mode = "continuous"
-            dpg.configure_item(self.trigger_btn_tag, enabled=False)
-        elif app_data == "Trigger":
+            if dpg.does_item_exist(self.trigger_btn_tag):
+                dpg.configure_item(self.trigger_btn_tag, enabled=False)
+        elif mode_val == "Trigger":
             self.acquisition_mode = "trigger"
-            dpg.configure_item(self.trigger_btn_tag, enabled=True)
+            if dpg.does_item_exist(self.trigger_btn_tag):
+                dpg.configure_item(self.trigger_btn_tag, enabled=True)
 
-    def _on_trigger(self, *args: Any, **kwargs: Any) -> None:
-        """
-        Request grab and dispatch of the next frame in Trigger mode.
-        """
+    def _on_trigger(
+        self,
+        sender: Any = None,
+        app_data: Any = None,
+        user_data: Any = None,
+        *args: Any,
+        **kwargs: Any,
+    ) -> None:
+        """Request grab and dispatch of the next frame in Trigger mode."""
         self.trigger_requested = True
 
-    def stop_cam_thread(self, *args: Any, **kwargs: Any) -> None:
-        """
-        Stop the frame acquisition worker thread.
-        """
+    def stop_cam_thread(
+        self,
+        sender: Any = None,
+        app_data: Any = None,
+        user_data: Any = None,
+        *args: Any,
+        **kwargs: Any,
+    ) -> None:
+        """Stop the frame acquisition worker thread."""
         self.cam_running = False
         if self.cam_thread and self.cam_thread.is_alive() and threading.current_thread() != self.cam_thread:
             self.cam_thread.join(timeout=1.0)
@@ -447,18 +456,23 @@ class Seecam_win(WindowBase):
         if dpg.does_item_exist(self.stop_btn_tag):
             dpg.configure_item(self.stop_btn_tag, enabled=False)
 
-    def start_cam_thread(self, *args: Any, **kwargs: Any) -> None:
-        """
-        Start the background frame grabber and FPS tracking worker thread.
-        """
+    def start_cam_thread(
+        self,
+        sender: Any = None,
+        app_data: Any = None,
+        user_data: Any = None,
+        *args: Any,
+        **kwargs: Any,
+    ) -> None:
+        """Start the background frame grabber and FPS tracking worker thread."""
         if not self.seecam.defined:
             target = dpg.get_value(self.camlist_tag) if dpg.does_item_exist(self.camlist_tag) else self.cam_name
             if not target and self.camlist:
                 target = self.camlist[0]
             if target:
-                self.select_cam(None, target)
+                self.select_cam(cam_name=target)
                 return
-            logger.warning("No camera selected to start")
+            logger.warning(f"[{self.label}] No camera selected to start")
             return
 
         if self.cam_thread and self.cam_thread.is_alive():
@@ -480,9 +494,24 @@ class Seecam_win(WindowBase):
             live_fps = 0.0
 
             while self.cam_running:
+                should_grab = False
                 if self.acquisition_mode == "continuous":
-                    ret, raw_frame = self.seecam.read()
-                    if ret and raw_frame is not None:
+                    should_grab = True
+                elif self.acquisition_mode == "trigger":
+                    if self.trigger_requested:
+                        self.trigger_requested = False
+                        should_grab = True
+                    else:
+                        time.sleep(0.01)
+                        continue
+
+                if not should_grab:
+                    time.sleep(0.01)
+                    continue
+
+                ret, raw_frame = self.seecam.read()
+                if ret and raw_frame is not None:
+                    if self.acquisition_mode == "continuous":
                         fps_count += 1
                         now = time.perf_counter()
                         if now - fps_start >= 1.0:
@@ -491,54 +520,45 @@ class Seecam_win(WindowBase):
                             fps_start = now
 
                             if dpg.does_item_exist(self.caminfo_tag):
-                                fmt, w, h, th = self.seecam.format, self.seecam.width, self.seecam.height, self.seecam.fps
-                                dpg.set_value(self.caminfo_tag, f"Format: {fmt} {w}x{h} | Th. {th:.0f} FPS | Live: {live_fps:.1f} FPS")
+                                fmt = self.seecam.format
+                                w, h = self.seecam.width, self.seecam.height
+                                th = self.seecam.fps
+                                dpg.set_value(
+                                    self.caminfo_tag,
+                                    f"Format: {fmt} {w}x{h} | Th. {th:.0f} FPS | Live: {live_fps:.1f} FPS",
+                                )
 
-                        raw_frame = self._apply_rotation(raw_frame)
-                        frame8_bit = self.seecam.convert_to_8bit(raw_frame, depth_mode=self.depth_mode)
-                        frame_bgr = self.seecam.convert_to_BGR(frame8_bit)
+                    raw_frame = self._apply_rotation(raw_frame)
+                    frame8_bit = self.seecam.convert_to_8bit(raw_frame, depth_mode=self.depth_mode)
+                    has_bgr_conn = bool(self.connections.get("8bit RGB"))
+                    frame_bgr = self.seecam.convert_to_BGR(frame8_bit) if has_bgr_conn else None
 
-                        with self._last_frame_lock:
-                            self._last_raw_frame = raw_frame
-                            self._last_bgr_frame = frame_bgr
+                    with self._last_frame_lock:
+                        self._last_raw_frame = raw_frame
+                        self._last_8bit_frame = frame8_bit
+                        self._last_bgr_frame = frame_bgr
 
-                        self.trigger_cb(raw_frame, frame_bgr)
+                    self.trigger_cb(raw_frame, frame_bgr if frame_bgr is not None else frame8_bit)
 
-                        if dpg.get_value(self.auto_exposure_tag):
-                            new_exp = self.seecam.auto_expos(frame8_bit)
+                    peak_val = self.seecam.calc_exposure(frame8_bit)
+                    if self.auto_exposure_enabled:
+                        new_exp = self.seecam.auto_expos(frame8_bit, frame_exposure=peak_val)
+                        if new_exp is not None and dpg.does_item_exist(self.webcam_exposure_tag):
                             dpg.set_value(self.webcam_exposure_tag, new_exp)
 
-                        if dpg.does_item_exist(self.frame_avg_tag):
-                            dpg.set_value(self.frame_avg_tag, f"Frame max: {self.seecam.calc_exposure(frame8_bit):.0f}")
-                    else:
-                        time.sleep(0.005)
+                    if dpg.does_item_exist(self.frame_avg_tag):
+                        dpg.set_value(
+                            self.frame_avg_tag,
+                            f"Frame max: {peak_val:.0f}",
+                        )
+                else:
+                    time.sleep(0.005)
 
-                elif self.acquisition_mode == "trigger":
-                    if self.trigger_requested:
-                        self.trigger_requested = False
-                        ret, raw_frame = self.seecam.read()
-                        if ret and raw_frame is not None:
-                            raw_frame = self._apply_rotation(raw_frame)
-                            frame8_bit = self.seecam.convert_to_8bit(raw_frame, depth_mode=self.depth_mode)
-                            frame_bgr = self.seecam.convert_to_BGR(frame8_bit)
-
-                            with self._last_frame_lock:
-                                self._last_raw_frame = raw_frame
-                                self._last_bgr_frame = frame_bgr
-
-                            self.trigger_cb(raw_frame, frame_bgr)
-
-                            if dpg.get_value(self.auto_exposure_tag):
-                                new_exp = self.seecam.auto_expos(frame8_bit)
-                                self.seecam.set_exposure(new_exp)
-                                dpg.set_value(self.webcam_exposure_tag, new_exp)
-
-                            if dpg.does_item_exist(self.frame_avg_tag):
-                                dpg.set_value(self.frame_avg_tag, f"Frame max: {self.seecam.calc_exposure(frame8_bit):.0f}")
-                    else:
-                        time.sleep(0.01)
-
-        self.cam_thread = threading.Thread(target=task, daemon=True)
+        self.cam_thread = threading.Thread(
+            target=task,
+            daemon=True,
+            name=f"SeecamWorker_{self.UUID}",
+        )
         self.cam_thread.start()
 
     def _apply_rotation(self, frame: np.ndarray) -> np.ndarray:
@@ -551,13 +571,8 @@ class Seecam_win(WindowBase):
         Returns:
             np.ndarray: Rotated image array.
         """
-        angle = config.get("Cameras", {}).get("Seecam", {}).get("rotation", 0)
-        if angle == 90:
-            return cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
-        elif angle == 180:
-            return cv2.rotate(frame, cv2.ROTATE_180)
-        elif angle == 270:
-            return cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
+        if self._rotation_code is not None:
+            return cv2.rotate(frame, self._rotation_code)
         return frame
 
     def trigger_cb(self, raw_frame: np.ndarray, bgr_frame: np.ndarray) -> None:
@@ -568,20 +583,30 @@ class Seecam_win(WindowBase):
             raw_frame: High bit-depth or raw image array.
             bgr_frame: Standard 8-bit BGR image array.
         """
-        source_bgr = (bgr_frame, f"Seecam_{self.cam_name}")
-        source_raw = (raw_frame, f"Seecam_raw_{self.cam_name}")
-
-        for idx, output_key in enumerate(self.outputs):
-            connected_modules = list(self.connections.get(output_key, []))
-            for module in connected_modules:
+        rgb_modules = self.connections.get("8bit RGB")
+        if rgb_modules:
+            if bgr_frame.ndim == 2:
+                bgr_frame = self.seecam.convert_to_BGR(bgr_frame)
+            source_bgr = (bgr_frame, f"Seecam_{self.cam_name}")
+            for module in list(rgb_modules):
                 try:
-                    if idx == 0:  # "8bit RGB"
-                        module.input_cb(data=source_bgr, data_type=IOTypes.FRAME)
-                    elif idx == 1:  # "16bit gray"
-                        dtype = IOTypes.FRAME16 if raw_frame.dtype == np.uint16 else IOTypes.FRAME
-                        module.input_cb(data=source_raw, data_type=dtype)
+                    module.input_cb(data=source_bgr, data_type=IOTypes.FRAME)
                 except Exception as e:
-                    logger.error(f"Error sending frame from Seecam ({output_key}): {e}")
+                    logger.error(
+                        f"[{self.label}] Error sending frame to {getattr(module, 'label', 'module')} (8bit RGB): {e}"
+                    )
+
+        gray_modules = self.connections.get("16bit gray")
+        if gray_modules:
+            source_raw = (raw_frame, f"Seecam_raw_{self.cam_name}")
+            dtype = IOTypes.FRAME16 if raw_frame.dtype == np.uint16 else IOTypes.FRAME
+            for module in list(gray_modules):
+                try:
+                    module.input_cb(data=source_raw, data_type=dtype)
+                except Exception as e:
+                    logger.error(
+                        f"[{self.label}] Error sending frame to {getattr(module, 'label', 'module')} (16bit gray): {e}"
+                    )
 
     def input_cb(self, data: Any = None, *args: Any, **kwargs: Any) -> None:
         """
@@ -598,7 +623,7 @@ class Seecam_win(WindowBase):
             - auto_exposure (bool): Enable or disable auto-exposure.
             - depth_mode (str): Set depth conversion mode ("Auto", "Normalize", "8-bit", etc.).
             - resolution (str): Switch format/resolution to a matching label.
-            - camera (str): Switch active camera device.
+            - camera / select_cam (str): Switch active camera device.
         """
         if data is None and "data" in kwargs:
             data = kwargs["data"]
@@ -612,49 +637,75 @@ class Seecam_win(WindowBase):
         else:
             cmd = None
 
-        if cmd and isinstance(cmd, dict):
-            if "start" in cmd and cmd["start"]:
-                self.start_cam_thread()
+        if not cmd or not isinstance(cmd, dict):
+            return
 
-            if "stop" in cmd and cmd["stop"]:
-                self.stop_cam_thread()
+        if cmd.get("start"):
+            self.start_cam_thread()
 
-            if "mode" in cmd:
-                mode_str = str(cmd["mode"]).capitalize()
-                if mode_str in ("Continuous", "Trigger"):
-                    self._on_mode_changed(None, mode_str)
-                    if dpg.does_item_exist(self.mode_radio_tag):
-                        dpg.set_value(self.mode_radio_tag, mode_str)
+        if cmd.get("stop"):
+            self.stop_cam_thread()
 
-            if "gain" in cmd:
+        if "mode" in cmd:
+            mode_str = str(cmd["mode"]).strip().capitalize()
+            if mode_str in ("Continuous", "Trigger"):
+                self._on_mode_changed(app_data=mode_str)
+                if dpg.does_item_exist(self.mode_radio_tag):
+                    dpg.set_value(self.mode_radio_tag, mode_str)
+
+        if "gain" in cmd:
+            try:
                 val_gain = int(cmd["gain"])
-                self.set_gain(None, val_gain)
+                self.set_gain(app_data=val_gain)
                 if dpg.does_item_exist(self.webcam_gain_tag):
                     dpg.set_value(self.webcam_gain_tag, val_gain)
+            except (ValueError, TypeError) as e:
+                logger.warning(f"[{self.label}] Invalid gain value '{cmd['gain']}': {e}")
 
-            if "exposure" in cmd:
+        if "exposure" in cmd:
+            try:
                 val_exp = int(cmd["exposure"])
-                self.set_exposure(None, val_exp)
+                self.set_exposure(app_data=val_exp)
                 if dpg.does_item_exist(self.webcam_exposure_tag):
                     dpg.set_value(self.webcam_exposure_tag, val_exp)
+            except (ValueError, TypeError) as e:
+                logger.warning(f"[{self.label}] Invalid exposure value '{cmd['exposure']}': {e}")
 
-            if "auto_exposure" in cmd:
-                val_auto = bool(cmd["auto_exposure"])
-                if dpg.does_item_exist(self.auto_exposure_tag):
-                    dpg.set_value(self.auto_exposure_tag, val_auto)
+        if "auto_exposure" in cmd:
+            val_auto = bool(cmd["auto_exposure"])
+            self.auto_exposure_enabled = val_auto
+            if dpg.does_item_exist(self.auto_exposure_tag):
+                dpg.set_value(self.auto_exposure_tag, val_auto)
 
-            if "depth_mode" in cmd:
-                self.depth_mode = str(cmd["depth_mode"])
+        if "depth_mode" in cmd:
+            self.depth_mode = str(cmd["depth_mode"])
 
-            if "resolution" in cmd:
-                self.change_resolution(None, str(cmd["resolution"]))
+        if "resolution" in cmd:
+            self.change_resolution(res_label=str(cmd["resolution"]))
 
-            if "camera" in cmd or "select_cam" in cmd:
-                target_cam = str(cmd.get("camera") or cmd.get("select_cam"))
-                self.select_cam(None, target_cam)
+        if "camera" in cmd or "select_cam" in cmd:
+            target_cam = str(cmd.get("camera") or cmd.get("select_cam"))
+            self.select_cam(cam_name=target_cam)
 
-            if cmd.get("trigger_cam") or cmd.get("trigger"):
-                self._on_trigger()
+        if cmd.get("trigger_cam") or cmd.get("trigger"):
+            self._on_trigger()
+
+    def get_last_frames(self) -> tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+        """
+        Thread-safe access to the most recently captured raw and BGR frames.
+
+        Returns:
+            Tuple containing (raw_frame, bgr_frame).
+        """
+        with self._last_frame_lock:
+            raw_copy = self._last_raw_frame.copy() if self._last_raw_frame is not None else None
+            if self._last_bgr_frame is not None:
+                bgr_copy = self._last_bgr_frame.copy()
+            elif self._last_8bit_frame is not None:
+                bgr_copy = self.seecam.convert_to_BGR(self._last_8bit_frame)
+            else:
+                bgr_copy = None
+            return raw_copy, bgr_copy
 
     def is_ready(self) -> bool:
         """
@@ -665,29 +716,20 @@ class Seecam_win(WindowBase):
         """
         return True
 
-    def is_outputs_ready(self) -> bool:
-        """
-        Check if downstream modules connected to this window are ready.
-
-        Returns:
-            bool: Always True for the camera stream.
-        """
-        return True
-
     def on_close(self) -> None:
         """
         Cleanup logic executed before window closure.
         """
         self.stop_cam_thread()
-        self.seecam.close()
+        if hasattr(self, "seecam") and self.seecam is not None:
+            self.seecam.close()
         super().on_close()
 
     def close(self) -> None:
         """
         Stop acquisition, release camera resources, and unregister module.
         """
-        self.stop_cam_thread()
-        self.seecam.close()
+        self.on_close()
         super().close()
 
 
